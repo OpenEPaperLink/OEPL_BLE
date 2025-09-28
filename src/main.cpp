@@ -46,6 +46,10 @@ void setup() {
     writeSerial("Initializing BLE...");
     Bluefruit.configCentralBandwidth(BANDWIDTH_MAX);
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+    
+    // Set maximum transmit power (+8 dBm)
+    Bluefruit.setTxPower(8);
+    
     if (!Bluefruit.begin(1, 0))
     {
         writeSerial("ERROR: Failed to initialize BLE!");
@@ -63,7 +67,7 @@ void setup() {
     Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
     writeSerial("BLE callbacks registered");
 
-    String deviceName = "OEPL_" + getChipIdHex();
+    String deviceName = "OEPL" + getChipIdHex();
     Bluefruit.setName(deviceName.c_str());
     writeSerial("Device name set to: " + deviceName);
 
@@ -94,25 +98,38 @@ void setup() {
 
     // Now add only the fields you want
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-    Bluefruit.Advertising.addTxPower();
+
+    //save space here
+
+    //Bluefruit.Advertising.addTxPower();
     Bluefruit.Advertising.addName();
 
-    // Create a single buffer with the Company ID (little-endian) + your payload.
-uint8_t manufacturer_data[] = {
-    0x37, 0x13,               // Company ID 0x1337 (little-endian)
-    0x02, 0x6C, 0x00, 0x6C,     // Your custom payload starts here
-    0x00, 0xC3, 0x01, 0xB8,
-    0x0B, 0x12, 0x32
-};
+//THIS IS A PLACEHOLDER FOR THE ACTUAL PAYLOAD
+//carefull, the size is limited
+uint8_t msd_payload[13];
+uint16_t msd_cid = 0x1337;
+memset(msd_payload, 0, sizeof(msd_payload));
+memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
+msd_payload[2] = 0x02;
+msd_payload[3] = 0x36;
+msd_payload[4] = 0x00;
+msd_payload[5] = 0x6C;
+msd_payload[6] = 0x00;
+msd_payload[7] = 0xC3;
+msd_payload[8] = 0x01;
+msd_payload[9] = 0xB9;
+msd_payload[10] = 0x0B;
+msd_payload[11] = 0x12;
+msd_payload[12] = 0xA6;
+Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_payload, sizeof(msd_payload));
 
-// Use the function that takes the pre-formatted buffer.
-Bluefruit.Advertising.addManufacturerData(manufacturer_data, sizeof(manufacturer_data));
 
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 1024);
     Bluefruit.Advertising.setFastTimeout(10);
 
     writeSerial("Starting BLE advertising...");
+    
     Bluefruit.Advertising.start(0);
     writeSerial("BLE advertising started - waiting for connections...");
     writeSerial("Advertising status: " + String(Bluefruit.Advertising.isRunning() ? "RUNNING" : "STOPPED"));
@@ -209,14 +226,6 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
     (void)reason;
     writeSerial("=== BLE CLIENT DISCONNECTED ===");
     writeSerial("Disconnect reason: " + String(reason));
-    writeSerial("Resetting image state...");
-    if (currentImage.data) {
-        free(currentImage.data);
-        currentImage.data = nullptr;
-        writeSerial("Image memory freed on disconnect");
-    }
-    memset(&currentImage, 0, sizeof(currentImage));
-    writeSerial("Image state reset complete");
 }
 
 String getChipIdHex() {
@@ -288,6 +297,10 @@ void handleImageCommand(uint8_t* data, uint16_t len) {
                 uint8_t ackResponse[] = {0x63, 0x00};
                 sendResponse(ackResponse, sizeof(ackResponse));
             }
+            break;
+        case 0x0005: // Display info command
+            writeSerial("=== DISPLAY INFO COMMAND (0x0005) ===");
+            handleDisplayInfo();
             break;
         default:
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
@@ -846,6 +859,69 @@ void handleReadDynamicConfig() {
     } else {
         writeSerial("ERROR: Failed to build Dynamic Config response");
     }
+}
+
+void handleDisplayInfo() {
+    writeSerial("Building Display Info response...");
+    
+    // Allocate response buffer (31 bytes payload + 2 bytes command header)
+    uint8_t response[33];
+    uint16_t offset = 0;
+    
+    // Command header (0x0005)
+    response[offset++] = 0x00;
+    response[offset++] = 0x05;
+    
+    // Payload starts here (31 bytes total)
+    // Fill with zeros initially
+    for (int i = 0; i < 31; i++) {
+        response[offset++] = 0x00;
+    }
+    
+    // Reset offset to payload start
+    offset = 2;
+    
+    // Offset 0-17: Reserved/unknown fields (set to 0)
+    // These are typically 0 in most implementations
+    for (int i = 0; i < 18; i++) {
+        response[offset++] = 0x00;
+    }
+    
+    // Offset 18: W/H Inversion flag (1 byte)
+    // 0 = not inverted, 1 = inverted
+    response[offset++] = 0x00; // Not inverted for our display
+    
+    // Offset 19: Reserved
+    response[offset++] = 0x00;
+    
+    // Offset 20-21: Reserved
+    response[offset++] = 0x00;
+    response[offset++] = 0x00;
+    
+    // Offset 22-23: Width (uint16, little-endian)
+    uint16_t width = display.width();
+    response[offset++] = width & 0xFF;
+    response[offset++] = (width >> 8) & 0xFF;
+    
+    // Offset 24-25: Height (uint16, little-endian)  
+    uint16_t height = display.height();
+    response[offset++] = height & 0xFF;
+    response[offset++] = (height >> 8) & 0xFF;
+    
+    // Offset 26-29: Reserved
+    for (int i = 0; i < 4; i++) {
+        response[offset++] = 0x00;
+    }
+    
+    // Offset 30: Color count (1=BW, 2=BWR/BWY, 3=BWRY)
+    // Our display is monochrome (black/white only)
+    response[offset++] = 0x01; // Monochrome
+    
+    writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: 1 (mono)");
+    
+    // Send the response
+    sendResponse(response, sizeof(response));
+    writeSerial("Display info response sent");
 }
 
 void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {

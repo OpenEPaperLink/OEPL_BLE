@@ -23,6 +23,7 @@ void handleImageInfo(uint8_t* data, uint16_t len);
 void handleBlockData(uint8_t* data, uint16_t len);
 void handleReadDynamicConfig();
 void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len);
+void handleDisplayInfo();
 void sendResponse(uint8_t* response, uint8_t len);
 uint32_t calculateCRC32(uint8_t* data, uint32_t len);
 void displayReceivedImage();
