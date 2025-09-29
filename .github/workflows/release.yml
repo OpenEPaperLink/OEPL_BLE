@@ -1,0 +1,46 @@
+name: Release nRF Firmware
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-upload:
+    name: Build & Upload Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+          pip install adafruit-nrfutil
+
+      - name: Build Firmware
+        run: |
+          cd NRF_firmware
+          pio run
+
+      - name: Copy Production Firmware
+        run: |
+          mkdir firmware_output
+          cp .pio/build/oeplnrf/production.hex firmware_output/production.hex
+
+      - name: Rename Files with Release Tag
+        run: |
+          TAG_NAME=${{ github.event.release.tag_name }}
+          adafruit-nrfutil dfu genpkg --dev-type 0x0052 --application firmware_output/production.hex firmware_output/dfu.zip
+          mv firmware_output/production.hex firmware_output/production-${TAG_NAME}.hex
+          mv firmware_output/dfu.zip firmware_output/dfu-${TAG_NAME}.zip
+
+      - name: Add files to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: firmware_output/*
+          tag: ${{ github.ref }}
+          file_glob: true
+          overwrite: true
