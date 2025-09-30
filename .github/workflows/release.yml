@@ -13,11 +13,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install PlatformIO
+      - name: Install PlatformIO & Tools
         run: |
           python -m pip install --upgrade pip
           pip install platformio
           pip install adafruit-nrfutil
+          curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o uf2conv.py
+          chmod +x uf2conv.py
 
       - name: Build Firmware
         run: |
@@ -28,14 +30,17 @@ jobs:
           mkdir firmware_output
           cp .pio/build/oeplnrf/firmware.hex firmware_output/production.hex
 
-      - name: Rename Files with Release Tag
+      - name: Rename & Package
         run: |
           TAG_NAME=${{ github.event.release.tag_name }}
           adafruit-nrfutil dfu genpkg --dev-type 0x0052 --application firmware_output/production.hex firmware_output/dfu.zip
           mv firmware_output/production.hex firmware_output/production-${TAG_NAME}.hex
           mv firmware_output/dfu.zip firmware_output/dfu-${TAG_NAME}.zip
+          python uf2conv.py firmware_output/production-${TAG_NAME}.hex \
+            --family 0xADA52840 \
+            --output firmware_output/production-${TAG_NAME}.uf2
 
-      - name: Add files to release
+      - name: Upload Release Assets
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
