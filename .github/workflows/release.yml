@@ -19,6 +19,7 @@ jobs:
           pip install platformio
           pip install adafruit-nrfutil
           curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o uf2conv.py
+          curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o uf2families.jso
           chmod +x uf2conv.py
 
       - name: Build Firmware
