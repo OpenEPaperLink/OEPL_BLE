@@ -2,11 +2,23 @@
 #include <bluefruit.h>
 #include "main.h"
 #include <SPI.h>
-#include <GxEPD2_BW.h>
-#include <GxEPD2_3C.h>
-#include <GxEPD2_7C.h>
-#include "GxEPD2_display_selection_new_style.h"
 #include <uzlib.h>
+#include <bb_epaper.h>
+
+BBEPAPER epd(EP426_800x480);
+
+#define Led_RED 26
+#define Led_Green 30
+#define Led_Blue 06
+#define CS_PIN 44
+#define DC_PIN 31
+#define RESET_PIN 15
+#define BUSY_PIN 29
+#define CLK_PIN 45
+#define MOSI_PIN 47
+#define PowerPin 43
+
+BLEDfu bledfu;
 
 BLEService imageService("1337");
 BLECharacteristic imageCharacteristic("1337",BLEWrite | BLENotify, 512);
@@ -18,43 +30,51 @@ uint8_t expectedPackets = 0;
 uint8_t receivedPackets = 0;
 
 static unsigned long lastLog = 0;
-int serial_enabled = 0;
-bool useserial = true;
 
 void setup() {
-    if (useserial) {
-        Serial.begin(115200);
-        bool usb_connected = bitRead(NRF_POWER->USBREGSTATUS, 0);
-        if (usb_connected) {
-            unsigned long startTime = millis();
-            while (!Serial && (millis() - startTime) < 10000) delay(100);
-            if (Serial) {
-                serial_enabled = 1;
-                writeSerial("=== BLE OEPL Device Starting ===");
-                writeSerial("USB detected, serial logging enabled and connected");
-            } else {
-                serial_enabled = 0;
-            }
-        }
-    }
-    
+    pinMode(Led_RED, OUTPUT);
+    pinMode(Led_Green, OUTPUT);
+    pinMode(Led_Blue, OUTPUT);
+    digitalWrite(Led_RED, HIGH);
+    digitalWrite(Led_Green, HIGH);
+    digitalWrite(Led_Blue, HIGH);
+    delay(100);
+    digitalWrite(Led_RED, LOW);
+    delay(100);
+    digitalWrite(Led_RED, HIGH);
+    digitalWrite(Led_Green, LOW);
+    delay(100);
+    digitalWrite(Led_Green, HIGH);
+    digitalWrite(Led_Blue, LOW);
+    delay(100);
+    digitalWrite(Led_Blue, HIGH);
+    delay(100);
+    digitalWrite(Led_RED, LOW);
+    digitalWrite(Led_Green, LOW);
+    digitalWrite(Led_Blue, LOW);
+    delay(100);
+    digitalWrite(Led_RED, HIGH);
+    digitalWrite(Led_Green, HIGH);
+    digitalWrite(Led_Blue, HIGH);
+
+    Serial.begin(115200);
+    bool usb_connected = bitRead(NRF_POWER->USBREGSTATUS, 0);
+    writeSerial("=== BLE OEPL Device Starting ===");
+
     writeSerial("Enabeling power management...");
     pinMode(PowerPin, OUTPUT);
     digitalWrite(PowerPin, HIGH);
-    pwrmgm(true);
-
     writeSerial("Initializing BLE...");
     Bluefruit.configCentralBandwidth(BANDWIDTH_MAX);
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-    
-    // Set maximum transmit power (+8 dBm)
     Bluefruit.setTxPower(8);
-    
     if (!Bluefruit.begin(1, 0))
     {
         writeSerial("ERROR: Failed to initialize BLE!");
         return;
     }
+    bledfu.begin();
+    writeSerial("BLE DFU initialized successfully");
     writeSerial("BLE initialized successfully");
     writeSerial("Setting up BLE service 0x1337...");
     imageService.begin();
@@ -83,24 +103,16 @@ void setup() {
     pinMode(VBAT_ENABLE, OUTPUT);
     digitalWrite(VBAT_ENABLE, LOW);
     writeSerial("Battery monitoring configured");
-    
-    writeSerial("Initializing display...");
+    writeSerial("Initializing display");
     initDisplay();
     writeSerial("Display initialized");
 
-    pwrmgm(false);
-    
     writeSerial("=== Setup completed successfully ===");
-    
     writeSerial("Configuring BLE advertising...");
     // Disable automatic UUID advertising
     Bluefruit.Advertising.clearData();
-
     // Now add only the fields you want
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-
-    //save space here
-
     //Bluefruit.Advertising.addTxPower();
     Bluefruit.Advertising.addName();
 
@@ -127,36 +139,30 @@ Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_pa
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 1024);
     Bluefruit.Advertising.setFastTimeout(10);
-
     writeSerial("Starting BLE advertising...");
-    
     Bluefruit.Advertising.start(0);
     writeSerial("BLE advertising started - waiting for connections...");
-    writeSerial("Advertising status: " + String(Bluefruit.Advertising.isRunning() ? "RUNNING" : "STOPPED"));
 }
 
 void pwrmgm(bool onoff){
-    if(true){
     if(onoff){
         digitalWrite(PowerPin, HIGH);
-        pinMode(EPD_RST, OUTPUT);
-        pinMode(EPD_CS, OUTPUT);
-        pinMode(EPD_DC, OUTPUT);
-        pinMode(EPD_SCK, OUTPUT);
-        pinMode(EPD_MOSI, OUTPUT);
+        pinMode(RESET_PIN, OUTPUT);
+        pinMode(CS_PIN, OUTPUT);
+        pinMode(DC_PIN, OUTPUT);
+        pinMode(CLK_PIN, OUTPUT);
+        pinMode(MOSI_PIN, OUTPUT);
         delay(200);
     }
     else{
         SPI.end();
-        pinMode(EPD_RST, INPUT);
-        pinMode(EPD_CS, INPUT);
-        pinMode(EPD_DC, INPUT);
-        pinMode(EPD_SCK, INPUT);
-        pinMode(EPD_MOSI, INPUT);
+        pinMode(RESET_PIN, INPUT);
+        pinMode(CS_PIN, INPUT);
+        pinMode(DC_PIN, INPUT);
+        pinMode(CLK_PIN, INPUT);
+        pinMode(MOSI_PIN, INPUT);
         digitalWrite(PowerPin, LOW);
     }
-}
-
 }
 
 void loop() {
@@ -175,8 +181,6 @@ void loop() {
 }
 
 void writeSerial(String message, bool newLine) {
-    if (serial_enabled == 1)
-    {
         if (newLine == true)
         {
             Serial.println(message);
@@ -185,36 +189,27 @@ void writeSerial(String message, bool newLine) {
         {
             Serial.print(message);
         }
-    }
 }
 
 void initDisplay() {
     writeSerial("=== Initializing Display ===");
-    display.init(115200, true, 10, false);
-    
-    display.setFullWindow();
-    display.setRotation(1);
-    display.epd2.setBusyCallback(busyCallback);
-    display.fillRect(0, 0, display.width(), display.height(), GxEPD_WHITE);
-    display.setTextColor(GxEPD_BLACK);
-    writeSerial("Display dimensions: " + String(display.width()) + "x" + String(display.height()));
-    writeSerial("Drawing initial display content...");
+    pwrmgm(true);
+    epd.initIO(DC_PIN, RESET_PIN, BUSY_PIN, CS_PIN, MOSI_PIN, CLK_PIN);
+    epd.allocBuffer();
+    epd.fillScreen(BBEP_WHITE);
+    epd.setTextColor(BBEP_BLACK, BBEP_WHITE);
+    epd.setFont(FONT_12x16);
     String chipId = getChipIdHex();
     writeSerial("Chip ID for display: " + chipId);
-    display.firstPage();
-    display.setTextSize(4);
-
-    do {
-        display.setTextSize(4);
-        display.println("openepaperlink.org");
-        display.println("ID:" + chipId);
-        display.println("Ready");
-      } while (display.nextPage());
-
-    display.display(false); // Force full refresh
-    display.setRotation(0);
-    pwrmgm(false); // Power down display after initial setup
-    writeSerial("Initial display content drawn");
+    epd.setCursor(100, 100); 
+    epd.print("openepaperlink.org");
+    epd.setCursor(100, 200); 
+    epd.print("ID:" + chipId);
+    epd.setCursor(100, 300); 
+    epd.print("Ready");
+    epd.writePlane();
+    epd.refresh(REFRESH_FULL, true);
+    pwrmgm(false);
 }
 
 void connect_callback(uint16_t conn_handle) {
@@ -243,19 +238,6 @@ String getChipIdHex() {
 }
 
 void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
-    //writeSerial("Connection handle: " + String(conn_hdl));
-    //writeSerial("Data length: " + String(len) + " bytes");
-    //String hexData = "";
-    //for (int i = 0; i < min(len, 9999); i++) {
-    //    if (data[i] < 16) hexData += "0";
-    //    hexData += String(data[i], HEX);
-    //    hexData += " ";
-    //}
-    //writeSerial("Data (hex): " + hexData);
-    //if (len >= 2) {
-    //    uint16_t command = (data[0] << 8) | data[1];
-    //    writeSerial("Detected command: 0x" + String(command, HEX));
-    //}
     handleImageCommand(data, len);
 }
 
@@ -353,8 +335,8 @@ void handleImageInfo(uint8_t* data, uint16_t len) {
     currentImage.dataType = dataType;
     currentImage.isCompressed = (dataType == 0x30);
     currentImage.ready = false;
-    currentImage.width = display.width();
-    currentImage.height = display.height();
+    currentImage.width = epd.width();
+    currentImage.height = epd.height();
     writeSerial("Image state initialized:");
     writeSerial("  Size: " + String(currentImage.size) + " bytes");
     writeSerial("  Type: 0x" + String(currentImage.dataType, HEX));
@@ -544,46 +526,14 @@ void displayReceivedImage() {
     writeSerial("  Compressed: " + String(currentImage.isCompressed ? "Yes" : "No"));
     writeSerial("  Dimensions: " + String(currentImage.width) + "x" + String(currentImage.height));
     writeSerial("  Received: " + String(currentImage.received) + " bytes");
-    
-    writeSerial("Powering on display...");
-    digitalWrite(EPD_RST, HIGH);
-    delay(100);
-    display.init(115200, true, 2, false);
-    display.setFullWindow();
-    delay(100);
-    writeSerial("Display powered on and initialized");
-    writeSerial("Drawing image content...");
-    display.firstPage();
-    writeSerial("Image drawing - firstPage() called");
-    int pageCount = 0;
-    unsigned long startTime = millis();
-    do {
-        pageCount++;
-        writeSerial("Displaying page " + String(pageCount) + "...");
-        drawImageData();
-        if (millis() - startTime > 10000) {
-            writeSerial("WARNING: Display timeout after 10 seconds");
-            break;
-        }
-        if (pageCount > 20) {
-            writeSerial("WARNING: Too many pages, stopping");
-            break;
-        }
-        
-    } while (display.nextPage());
-    writeSerial("Image display complete (" + String(pageCount) + " pages)");
-    display.display(false); // Force full refresh
-    writeSerial("Hibernating display...");
+    pwrmgm(true);
+    epd.initIO(DC_PIN, RESET_PIN, BUSY_PIN, CS_PIN, MOSI_PIN, CLK_PIN);
+    epd.allocBuffer();
+    drawImageData();
+    epd.writePlane();
+    epd.refresh(REFRESH_FULL, true);
     pwrmgm(false); // Power down display after update is complete
     writeSerial("=== IMAGE DISPLAY COMPLETE ===");
-}
-
-void busyCallback(const void* userData) {
-    yield();
-    if (millis() - lastLog > 1000) {
-         writeSerial("Display busy...");
-         lastLog = millis();
-     }
 }
 
 bool decompressImageData(uint8_t** output, uint32_t* outputSize) {
@@ -675,20 +625,18 @@ bool decompressImageData(uint8_t** output, uint32_t* outputSize) {
 }
 
 void drawImageData() {
-    if (!currentImage.data) {
-        writeSerial("ERROR: No image data to draw");
-        return;
-    }
-    pwrmgm(true);
     writeSerial("Drawing full image data...");
     writeSerial("Displaying all " + String(currentImage.size) + " bytes of image data");
-    uint16_t displayWidth = display.width();
-    uint16_t displayHeight = display.height();
+
+    uint16_t displayWidth = epd.width();
+    uint16_t displayHeight = epd.height();
     uint32_t expectedBytes = (displayWidth * displayHeight) / 8; 
-    writeSerial("Display dimensions: " + String(displayWidth) + "x" + String(displayHeight));
+    
     writeSerial("Expected bytes for 1-bit: " + String(expectedBytes));
     writeSerial("Actual received bytes: " + String(currentImage.size));
     writeSerial("Image type: 0x" + String(currentImage.dataType, HEX));
+    
+    //uncompressed image 1bpp
     if (currentImage.dataType == 0x20) {
         writeSerial("Processing 1-bit black/white image");
         // Process uncompressed image data
@@ -701,26 +649,70 @@ void drawImageData() {
                     if (x >= displayHeight) break;
                     bool pixelValue = (pixelByte >> bit) & 0x01;
                     if (pixelValue) {
-                        display.drawPixel(displayWidth - y, x, GxEPD_BLACK);
+                       epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
                     } else {
-                        display.drawPixel(displayWidth - y, x, GxEPD_WHITE);
+                        epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
                     }
                     
                     x++;
                 }
-                x--; // Adjust for the loop increment
+                x--; 
                 pixelIndex++;
             }
         }
-    } else if (currentImage.dataType == 0x30) {
+    }
+    
+    else if (currentImage.dataType == 0x30) {
         writeSerial("Processing compressed image data");
         
-        // Check if we have complete data
-        if (currentImage.received < currentImage.size) {
-            writeSerial("ERROR: Incomplete data received: " + String(currentImage.received) + "/" + String(currentImage.size) + " bytes");
-            writeSerial("Cannot decompress incomplete data");
-            return;
+        // Dump compressed image buffer in hex
+        writeSerial("=== COMPRESSED IMAGE BUFFER HEX DUMP ===");
+        writeSerial("Total size: " + String(currentImage.size) + " bytes");
+        writeSerial("Received: " + String(currentImage.received) + " bytes");
+        
+        // Dump first 64 bytes in detail
+        writeSerial("First 64 bytes:");
+        String hexLine = "";
+        for (uint32_t i = 0; i < min((uint32_t)64, currentImage.received); i++) {
+            if (currentImage.data[i] < 0x10) hexLine += "0";
+            hexLine += String(currentImage.data[i], HEX) + " ";
+            if ((i + 1) % 16 == 0) {
+                writeSerial(hexLine);
+                hexLine = "";
+            }
         }
+        if (hexLine.length() > 0) {
+            writeSerial(hexLine);
+        }
+        
+        // Dump length header (first 4 bytes)
+        if (currentImage.received >= 4) {
+            uint32_t originalLength = *(uint32_t*)(currentImage.data);
+            writeSerial("Length header: " + String(originalLength) + " bytes (0x" + String(originalLength, HEX) + ")");
+        }
+        
+        // Dump compressed data (after 4-byte header) in chunks
+        if (currentImage.received > 4) {
+            writeSerial("Compressed DEFLATE data (after header):");
+            uint32_t compressedDataSize = currentImage.received - 4;
+            uint32_t bytesToDump = min(compressedDataSize, (uint32_t)256); // Limit to first 256 bytes
+            
+            for (uint32_t i = 0; i < bytesToDump; i++) {
+                if (i % 16 == 0) {
+                    if (i > 0) writeSerial(hexLine);
+                    hexLine = String(i + 4, HEX) + ": ";
+                }
+                if (currentImage.data[i + 4] < 0x10) hexLine += "0";
+                hexLine += String(currentImage.data[i + 4], HEX) + " ";
+            }
+            if (hexLine.length() > 0) {
+                writeSerial(hexLine);
+            }
+            if (compressedDataSize > 256) {
+                writeSerial("... (truncated, showing first 256 bytes of " + String(compressedDataSize) + " total)");
+            }
+        }
+        writeSerial("=== END HEX DUMP ===");
         
         // Decompress the data first
         uint8_t* decompressedData = nullptr;
@@ -751,9 +743,9 @@ void drawImageData() {
                             if (x >= displayHeight) break;
                             bool pixelValue = (pixelByte >> bit) & 0x01;
                             if (pixelValue) {
-                                display.drawPixel(displayWidth - y, x, GxEPD_BLACK);
+                                epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
                             } else {
-                                display.drawPixel(displayWidth - y, x, GxEPD_WHITE);
+                                epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
                             }
                             
                             x++;
@@ -818,9 +810,9 @@ void drawImageData() {
                     if (x >= displayHeight) break;
                     bool pixelValue = (pixelByte >> bit) & 0x01;
                     if (pixelValue) {
-                        display.drawPixel(displayWidth - y, x, GxEPD_BLACK);
+                       epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
                     } else {
-                        display.drawPixel(displayWidth - y, x, GxEPD_WHITE);
+                        epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
                     }
                     
                     x++;
@@ -863,62 +855,38 @@ void handleReadDynamicConfig() {
 
 void handleDisplayInfo() {
     writeSerial("Building Display Info response...");
-    
-    // Allocate response buffer (31 bytes payload + 2 bytes command header)
     uint8_t response[33];
     uint16_t offset = 0;
-    
-    // Command header (0x0005)
     response[offset++] = 0x00;
     response[offset++] = 0x05;
-    
-    // Payload starts here (31 bytes total)
-    // Fill with zeros initially
     for (int i = 0; i < 31; i++) {
         response[offset++] = 0x00;
     }
-    
-    // Reset offset to payload start
     offset = 2;
-    
-    // Offset 0-17: Reserved/unknown fields (set to 0)
-    // These are typically 0 in most implementations
     for (int i = 0; i < 18; i++) {
         response[offset++] = 0x00;
     }
-    
-    // Offset 18: W/H Inversion flag (1 byte)
-    // 0 = not inverted, 1 = inverted
-    response[offset++] = 0x00; // Not inverted for our display
-    
-    // Offset 19: Reserved
-    response[offset++] = 0x00;
-    
-    // Offset 20-21: Reserved
+    response[offset++] = 0x00; 
     response[offset++] = 0x00;
     response[offset++] = 0x00;
-    
+    response[offset++] = 0x00;
     // Offset 22-23: Width (uint16, little-endian)
-    uint16_t width = display.width();
+    uint16_t width = epd.width();
     response[offset++] = width & 0xFF;
     response[offset++] = (width >> 8) & 0xFF;
-    
     // Offset 24-25: Height (uint16, little-endian)  
-    uint16_t height = display.height();
+    uint16_t height = epd.height();
     response[offset++] = height & 0xFF;
     response[offset++] = (height >> 8) & 0xFF;
-    
     // Offset 26-29: Reserved
     for (int i = 0; i < 4; i++) {
         response[offset++] = 0x00;
     }
-    
     // Offset 30: Color count (1=BW, 2=BWR/BWY, 3=BWRY)
     // Our display is monochrome (black/white only)
     response[offset++] = 0x01; // Monochrome
     
     writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: 1 (mono)");
-    
     // Send the response
     sendResponse(response, sizeof(response));
     writeSerial("Display info response sent");
@@ -942,10 +910,10 @@ void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     // W/H Inversed (2 bytes)
     buffer[offset++] = 0x00; // Not inversed
     buffer[offset++] = 0x00;
-    uint16_t screenHeight = display.width();
+    uint16_t screenHeight = epd.width();
     buffer[offset++] = screenHeight & 0xFF;
     buffer[offset++] = (screenHeight >> 8) & 0xFF;
-    uint16_t screenWidth = display.height();
+    uint16_t screenWidth = epd.height();
     buffer[offset++] = screenWidth & 0xFF; 
     buffer[offset++] = (screenWidth >> 8) & 0xFF;
     buffer[offset++] = 0x00;
