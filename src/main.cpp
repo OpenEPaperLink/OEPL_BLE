@@ -1,11 +1,24 @@
 #include "main.h"
 
 void setup() {
-    initio();
     Serial.begin(115200);
     bool usb_connected = bitRead(NRF_POWER->USBREGSTATUS, 0);
+    writeSerial("Starting setup...");
+    writeSerial("Initializing config storage...");
+    if (initConfigStorage()) {
+        writeSerial("Config storage initialized successfully");
+    } else {
+        writeSerial("Config storage initialization failed");
+    }
+    writeSerial("Loading global configuration...");
+    if (loadGlobalConfig()) {
+        writeSerial("Global configuration loaded successfully");
+        printConfigSummary();
+    } else {
+       writeSerial("Global configuration load failed or no config found");
+    }
+    initio();
     writeSerial("=== BLE OEPL Device Starting ===");
-    delay(2000);
     if (usb_connected) {writeSerial("USB connected");}
     writeSerial("Initializing BLE...");
     Bluefruit.configCentralBandwidth(BANDWIDTH_MAX);
@@ -32,25 +45,6 @@ void setup() {
     sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
     sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
     writeSerial("Power management configured");
-    writeSerial("Initializing config storage...");
-    if (initConfigStorage()) {
-        writeSerial("Config storage initialized successfully");
-    } else {
-        writeSerial("Config storage initialization failed");
-    }
-    writeSerial("Loading global configuration...");
-    if (loadGlobalConfig()) {
-        writeSerial("Global configuration loaded successfully");
-        printConfigSummary();
-    } else {
-       writeSerial("Global configuration load failed or no config found");
-    }
-
-    writeSerial("Initializing display");
-    initDisplay();
-    writeSerial("Display initialized");
-
-    writeSerial("=== Setup completed successfully ===");
     writeSerial("Configuring BLE advertising...");
     Bluefruit.Advertising.clearData();
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
@@ -62,6 +56,10 @@ void setup() {
     writeSerial("Starting BLE advertising...");
     Bluefruit.Advertising.start(0);
     writeSerial("BLE advertising started - waiting for connections...");
+    writeSerial("Initializing display");
+    initDisplay();
+    writeSerial("Display initialized");
+    writeSerial("=== Setup completed successfully ===");
 }
 
 void initio(){
@@ -179,9 +177,9 @@ void initDisplay() {
     writeSerial(String("Width: ") + String(epd.width()));
 
     epd.allocBuffer();
-    //epd.allocBuffer(true);
+    if(Color_Scheme == 1)epd.allocBuffer(true);
+    //Rotation_Map
     epd.fillScreen(BBEP_WHITE);
-    //epd.fillScreen(BBEP_3COLOR);
     epd.setTextColor(BBEP_BLACK, BBEP_WHITE);
     epd.setFont(FONT_12x16);
     String chipId = getChipIdHex();
@@ -728,9 +726,11 @@ void handleDisplayInfo() {
     }
     // Offset 30: Color count (1=BW, 2=BWR/BWY, 3=BWRY)
     // Our display is monochrome (black/white only)
-    response[offset++] = 0x01; // Monochrome
+    if(Color_Scheme == 0)response[offset++] = 0x01; // Monochrome
+    else if(Color_Scheme == 1)response[offset++] = 0x02;
+    else response[offset++] = 0x00;
     
-    writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: 1 (mono)");
+    writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: " + String(Color_Scheme));
     // Send the response
     sendResponse(response, sizeof(response));
     writeSerial("Display info response sent");
@@ -739,19 +739,13 @@ void handleDisplayInfo() {
 void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     writeSerial("Building Dynamic Config response...");
     uint16_t offset = 0;
-    // Screen Type (2 bytes) - 1-color display (black/white only)
-    buffer[offset++] = 0x20; // 1-color display type
+    buffer[offset++] = 0x20;
     buffer[offset++] = 0x00;
-    // Default Settings (41 bytes)
-    // HW Type (2 bytes)
     buffer[offset++] = 0x36;
     buffer[offset++] = 0x00;
-    // Screen Functions (2 bytes)
     buffer[offset++] = 0x01; // Basic display functions
     buffer[offset++] = 0x00;
-    // W/H Inversed BLE (1 byte)
     buffer[offset++] = 0x00; // Not inversed
-    // W/H Inversed (2 bytes)
     buffer[offset++] = 0x00; // Not inversed
     buffer[offset++] = 0x00;
     uint16_t screenHeight = epd.width();
@@ -764,7 +758,9 @@ void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
-    buffer[offset++] = 0x01;
+    if(Color_Scheme == 0)buffer[offset++] = 0x01; // Monochrome
+    else if(Color_Scheme == 1)buffer[offset++] = 0x02;
+    else buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
@@ -1725,6 +1721,8 @@ void printConfigSummary() {
         CLK_PIN = globalConfig.displays[i].reserved_pin_1;
         MOSI_PIN = globalConfig.displays[i].data_pin;
 
+        Color_Scheme = globalConfig.displays[i].color_scheme;
+        Rotation_Map = globalConfig.displays[i].rotation;
     }
     
     // LEDs

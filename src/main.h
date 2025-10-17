@@ -28,6 +28,9 @@ uint32_t CLK_PIN = 45;
 uint32_t MOSI_PIN = 47;
 uint32_t PowerPin = 43;
 
+uint32_t Color_Scheme = 0;
+uint32_t Rotation_Map = 0;
+
 BLEDfu bledfu;
 
 BLEService imageService("1337");
