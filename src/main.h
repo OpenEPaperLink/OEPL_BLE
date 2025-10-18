@@ -17,9 +17,12 @@
 
 BBEPAPER epd(EP426_800x480);
 
+uint8_t led_count = 0;
 uint32_t Led_RED = 26;
 uint32_t Led_Green = 30;
 uint32_t Led_Blue = 06;
+
+uint8_t display_count = 0;
 uint32_t CS_PIN = 44;
 uint32_t DC_PIN = 31;
 uint32_t RESET_PIN = 15;
@@ -34,7 +37,7 @@ uint32_t Rotation_Map = 0;
 BLEDfu bledfu;
 
 BLEService imageService("1337");
-BLECharacteristic imageCharacteristic("1337",BLEWrite | BLENotify, 512);
+BLECharacteristic imageCharacteristic("1337", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
 
 ImageData currentImage = {0};
 uint8_t currentBlockId = 0;

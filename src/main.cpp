@@ -63,6 +63,7 @@ void setup() {
 }
 
 void initio(){
+    if(led_count > 0){
     pinMode(Led_RED, OUTPUT);
     pinMode(Led_Green, OUTPUT);
     pinMode(Led_Blue, OUTPUT);
@@ -87,6 +88,7 @@ void initio(){
     digitalWrite(Led_RED, HIGH);
     digitalWrite(Led_Green, HIGH);
     digitalWrite(Led_Blue, HIGH);
+    }
     analogReference(AR_INTERNAL_2_4);
     analogReadResolution(ADC_RESOLUTION);
     pinMode(PIN_VBAT, INPUT);
@@ -163,6 +165,7 @@ void writeSerial(String message, bool newLine) {
 
 void initDisplay() {
     writeSerial("=== Initializing Display ===");
+    if(display_count > 0){
     pwrmgm(true);
     epd.initIO(DC_PIN, RESET_PIN, BUSY_PIN, CS_PIN, MOSI_PIN, CLK_PIN);
 
@@ -196,8 +199,12 @@ void initDisplay() {
     epd.print("Test");
     epd.writePlane();
     epd.refresh(REFRESH_FULL, false);
-    delay(2000);
+    delay(20000);
     pwrmgm(false);
+    }
+    else{
+        writeSerial("No display found");
+    }
 }
 
 void connect_callback(uint16_t conn_handle) {
@@ -285,6 +292,12 @@ void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, 
         case 0x0005: // Display info command
             writeSerial("=== DISPLAY INFO COMMAND (0x0005) ===");
             handleDisplayInfo();
+            break;
+            break;
+        case 0x000F: // Reboot
+            writeSerial("=== Reboot COMMAND (0x000F) ===");
+            delay(100);
+            NVIC_SystemReset();
             break;
         default:
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
@@ -1010,6 +1023,8 @@ bool initConfigStorage() {
     }
     
     writeSerial("Internal file system mounted successfully");
+
+    //InternalFS.format();
     
     // Test file system operations
     writeSerial("Testing file system operations...");
@@ -1712,7 +1727,8 @@ void printConfigSummary() {
         writeSerial("  Color Scheme: 0x" + String(globalConfig.displays[i].color_scheme, HEX));
         writeSerial("  Transmission Modes: 0x" + String(globalConfig.displays[i].transmission_modes, HEX));
         writeSerial("");
-
+        
+        display_count++;
         epd = BBEPAPER(globalConfig.displays[i].panel_ic_type);
         CS_PIN = globalConfig.displays[i].cs_pin;
         DC_PIN = globalConfig.displays[i].dc_pin;
@@ -1737,6 +1753,11 @@ void printConfigSummary() {
                    " 4=" + String(globalConfig.leds[i].led_4));
         writeSerial("  Flags: 0x" + String(globalConfig.leds[i].led_flags, HEX));
         writeSerial("");
+
+        led_count++;
+        Led_RED = globalConfig.leds[i].led_1_r;
+        Led_Green = globalConfig.leds[i].led_2_g;
+        Led_Blue = globalConfig.leds[i].led_3_b;
     }
     
     // Sensors
