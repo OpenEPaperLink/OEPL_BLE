@@ -1,10 +1,5 @@
-# NRF52840 OEPL BLE
+# OEPL BLE Firmware for NRF52840 and ESP32
 
 ## TODO List
-
-- [ ] **Manufacturer ID** - Configure BLE manufacturer data
-- [ ] **Compression** - Implement compressed image upload
 - [ ] **Power Consumption** - Improve power efficiency
-- [ ] **Display** - Fix display issues
 - [ ] **Display Types** - Implement more display types
-- [ ] **Dynamic Config** - Implement dynamic configuration

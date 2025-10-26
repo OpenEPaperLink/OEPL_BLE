@@ -1,9 +1,173 @@
 #include "main.h"
 
+#ifdef TARGET_NRF
+BLEDfu bledfu;
+BLEService imageService("1337");
+BLECharacteristic imageCharacteristic("1337", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
+#endif
+
+#ifdef TARGET_ESP32
+// BLE Server Callbacks
+class MyBLEServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        writeSerial("=== BLE CLIENT CONNECTED (ESP32) ===");
+        writeSerial("Client connected to ESP32 BLE server");
+        delay(100);  // Give connection time to fully establish
+        writeSerial("Number of connected clients: " + String(pServer->getConnectedCount()));
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+        writeSerial("=== BLE CLIENT DISCONNECTED (ESP32) ===");
+        writeSerial("Client disconnected from ESP32 BLE server");
+        writeSerial("Number of remaining clients: " + String(pServer->getConnectedCount()));
+        
+        if (currentImage.data || currentImage.blocksReceived || 
+            currentImage.blockBytesReceived || currentImage.blockPacketsReceived) {
+            writeSerial("Cleaning up image data due to disconnect...");
+            cleanupImageMemory();
+        }
+        
+        // Restart advertising to allow new connections
+        writeSerial("Waiting before restarting advertising...");
+        delay(500);
+        
+        if (pServer->getConnectedCount() == 0) {
+            BLEDevice::startAdvertising();
+            writeSerial("Advertising restarted");
+        } else {
+            writeSerial("Other clients still connected, not restarting advertising");
+        }
+    }
+};
+
+// BLE Characteristic Callbacks
+class MyBLECharacteristicCallbacks : public BLECharacteristicCallbacks {
+public:
+    void onWrite(BLECharacteristic* pCharacteristic) {
+        writeSerial("=== BLE WRITE RECEIVED (ESP32) ===");
+        String value = pCharacteristic->getValue();
+        writeSerial("Received data length: " + String(value.length()) + " bytes");
+        if (value.length() > 0) {
+            uint8_t* data = (uint8_t*)value.c_str();
+            uint16_t len = value.length();
+            // Log first few bytes
+            String hexDump = "Data: ";
+            for (int i = 0; i < len && i < 16; i++) {
+                if (data[i] < 16) hexDump += "0";
+                hexDump += String(data[i], HEX) + " ";
+            }
+            writeSerial(hexDump);
+            imageDataWritten(NULL, NULL, data, len);
+        } else {
+            writeSerial("WARNING: Empty data received");
+        }
+    }
+};
+#endif
+
+#ifdef TARGET_ESP32
+BLEServer* pServer = nullptr;
+BLEService* pService = nullptr;
+BLECharacteristic* pTxCharacteristic = nullptr;
+BLECharacteristic* pRxCharacteristic = nullptr;
+MyBLECharacteristicCallbacks* charCallbacks = nullptr;
+#endif
+
 void setup() {
     Serial.begin(115200);
-    bool usb_connected = bitRead(NRF_POWER->USBREGSTATUS, 0);
     writeSerial("Starting setup...");
+    writeSerial("Initializing full config...");
+    full_config_init();
+    writeSerial("Full config initialized");
+    writeSerial("Io initialization...");
+    initio();
+    writeSerial("Initializing BLE...");
+    ble_init();
+    writeSerial("BLE advertising started - waiting for connections...");
+    writeSerial("Initializing display");
+    initDisplay();
+    writeSerial("Display initialized");
+    writeSerial("=== Setup completed successfully ===");
+}
+
+void loop() {
+    if (currentImage.ready) {
+        writeSerial("Processing received image...");
+        displayReceivedImage();
+        currentImage.ready = false;
+        cleanupImageMemory();
+        writeSerial("Image processing complete");
+    }
+    if(globalConfig.power_option.sleep_timeout_ms > 0)delay(globalConfig.power_option.sleep_timeout_ms);
+    else delay(2000);    
+    writeSerial("Loop end: " + String(millis() / 100));
+}
+
+void initio(){
+    if(globalConfig.led_count > 0){
+    pinMode(globalConfig.leds[0].led_1_r, OUTPUT);
+    pinMode(globalConfig.leds[0].led_2_g, OUTPUT);
+    pinMode(globalConfig.leds[0].led_3_b, OUTPUT);
+    digitalWrite(globalConfig.leds[0].led_1_r, HIGH);
+    digitalWrite(globalConfig.leds[0].led_2_g, HIGH);
+    digitalWrite(globalConfig.leds[0].led_3_b, HIGH);
+    delay(100);
+    digitalWrite(globalConfig.leds[0].led_1_r, LOW);
+    delay(100);
+    digitalWrite(globalConfig.leds[0].led_1_r, HIGH);
+    digitalWrite(globalConfig.leds[0].led_2_g, LOW);
+    delay(100);
+    digitalWrite(globalConfig.leds[0].led_2_g, HIGH);
+    digitalWrite(globalConfig.leds[0].led_3_b, LOW);
+    delay(100);
+    digitalWrite(globalConfig.leds[0].led_3_b, HIGH);
+    delay(100);
+    digitalWrite(globalConfig.leds[0].led_1_r, LOW);
+    digitalWrite(globalConfig.leds[0].led_2_g, LOW);
+    digitalWrite(globalConfig.leds[0].led_3_b, LOW);
+    delay(100);
+    digitalWrite(globalConfig.leds[0].led_1_r, HIGH);
+    digitalWrite(globalConfig.leds[0].led_2_g, HIGH);
+    digitalWrite(globalConfig.leds[0].led_3_b, HIGH);
+    }
+    
+    if(globalConfig.system_config.pwr_pin != 0xFF){
+    pinMode(globalConfig.system_config.pwr_pin, OUTPUT);
+    digitalWrite(globalConfig.system_config.pwr_pin, LOW);
+    }
+    else{
+        writeSerial("Power pin not set");
+    }
+}
+//placeholder function for the actual payload 
+void updatemsdata(){
+//THIS IS A PLACEHOLDER FOR THE ACTUAL PAYLOAD
+//carefull, the size is limited
+uint8_t msd_payload[13];
+uint16_t msd_cid = 0x1337;
+memset(msd_payload, 0, sizeof(msd_payload));
+memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
+msd_payload[2] = 0x02;
+msd_payload[3] = 0x36;
+msd_payload[4] = 0x00;
+msd_payload[5] = 0x6C;
+msd_payload[6] = 0x00;
+msd_payload[7] = 0xC3;
+msd_payload[8] = 0x01;
+msd_payload[9] = 0xB9;
+msd_payload[10] = 0x0B;
+msd_payload[11] = 0x12;
+msd_payload[12] = 0xA6;
+#ifdef TARGET_NRF
+Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_payload, sizeof(msd_payload));
+#endif
+#ifdef TARGET_ESP32
+// ESP32 uses BLEAdvertisementData for manufacturer data, currently defined somewhere else
+#endif
+writeSerial("MSD data updated");
+}
+
+void full_config_init(){
     writeSerial("Initializing config storage...");
     if (initConfigStorage()) {
         writeSerial("Config storage initialized successfully");
@@ -17,13 +181,13 @@ void setup() {
     } else {
        writeSerial("Global configuration load failed or no config found");
     }
-    initio();
-    writeSerial("=== BLE OEPL Device Starting ===");
-    if (usb_connected) {writeSerial("USB connected");}
-    writeSerial("Initializing BLE...");
+}
+
+void ble_init(){
+    #ifdef TARGET_NRF
     Bluefruit.configCentralBandwidth(BANDWIDTH_MAX);
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-    Bluefruit.setTxPower(8);
+    Bluefruit.setTxPower(globalConfig.power_option.tx_power);
     Bluefruit.begin(1, 0);
     bledfu.begin();
     writeSerial("BLE DFU initialized successfully");
@@ -55,151 +219,183 @@ void setup() {
     Bluefruit.Advertising.setFastTimeout(10);
     writeSerial("Starting BLE advertising...");
     Bluefruit.Advertising.start(0);
-    writeSerial("BLE advertising started - waiting for connections...");
-    writeSerial("Initializing display");
-    initDisplay();
-    writeSerial("Display initialized");
-    writeSerial("=== Setup completed successfully ===");
-}
-
-void initio(){
-    if(led_count > 0){
-    pinMode(Led_RED, OUTPUT);
-    pinMode(Led_Green, OUTPUT);
-    pinMode(Led_Blue, OUTPUT);
-    digitalWrite(Led_RED, HIGH);
-    digitalWrite(Led_Green, HIGH);
-    digitalWrite(Led_Blue, HIGH);
-    delay(100);
-    digitalWrite(Led_RED, LOW);
-    delay(100);
-    digitalWrite(Led_RED, HIGH);
-    digitalWrite(Led_Green, LOW);
-    delay(100);
-    digitalWrite(Led_Green, HIGH);
-    digitalWrite(Led_Blue, LOW);
-    delay(100);
-    digitalWrite(Led_Blue, HIGH);
-    delay(100);
-    digitalWrite(Led_RED, LOW);
-    digitalWrite(Led_Green, LOW);
-    digitalWrite(Led_Blue, LOW);
-    delay(100);
-    digitalWrite(Led_RED, HIGH);
-    digitalWrite(Led_Green, HIGH);
-    digitalWrite(Led_Blue, HIGH);
+    #endif
+    #ifdef TARGET_ESP32
+    writeSerial("=== Initializing ESP32 BLE ===");
+    String deviceName = "OEPL" + getChipIdHex();
+    writeSerial("Device name will be: " + deviceName);
+    BLEDevice::init(deviceName.c_str());
+    writeSerial("Setting BLE MTU to 512...");
+    BLEDevice::setMTU(512);
+    pServer = BLEDevice::createServer();
+    if (pServer == nullptr) {
+        writeSerial("ERROR: Failed to create BLE server");
+        return;
     }
-    analogReference(AR_INTERNAL_2_4);
-    analogReadResolution(ADC_RESOLUTION);
-    pinMode(PIN_VBAT, INPUT);
-    pinMode(VBAT_ENABLE, OUTPUT);
-    digitalWrite(VBAT_ENABLE, LOW);
-    pinMode(PowerPin, OUTPUT);
-    digitalWrite(PowerPin, LOW);
-}
-
-void updatemsdata(){
-//THIS IS A PLACEHOLDER FOR THE ACTUAL PAYLOAD
-//carefull, the size is limited
-uint8_t msd_payload[13];
-uint16_t msd_cid = 0x1337;
-memset(msd_payload, 0, sizeof(msd_payload));
-memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
-msd_payload[2] = 0x02;
-msd_payload[3] = 0x36;
-msd_payload[4] = 0x00;
-msd_payload[5] = 0x6C;
-msd_payload[6] = 0x00;
-msd_payload[7] = 0xC3;
-msd_payload[8] = 0x01;
-msd_payload[9] = 0xB9;
-msd_payload[10] = 0x0B;
-msd_payload[11] = 0x12;
-msd_payload[12] = 0xA6;
-Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_payload, sizeof(msd_payload));
-writeSerial("MSD data updated");
+    MyBLEServerCallbacks* serverCallbacks = new MyBLEServerCallbacks();
+    pServer->setCallbacks(serverCallbacks);
+    writeSerial("Server callbacks configured");
+    BLEUUID serviceUUID("00001337-0000-1000-8000-00805F9B34FB");
+    pService = pServer->createService(serviceUUID);
+    if (pService == nullptr) {
+        writeSerial("ERROR: Failed to create BLE service");
+        return;
+    }
+    writeSerial("BLE service 0x1337 created successfully");
+    BLEUUID charUUID("00001337-0000-1000-8000-00805F9B34FB");
+    pTxCharacteristic = pService->createCharacteristic(
+        charUUID,
+        BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_NOTIFY |
+        BLECharacteristic::PROPERTY_WRITE |
+        BLECharacteristic::PROPERTY_WRITE_NR
+    );
+    if (pTxCharacteristic == nullptr) {
+        writeSerial("ERROR: Failed to create BLE characteristic");
+        return;
+    }
+    writeSerial("Characteristic created with properties: READ, NOTIFY, WRITE, WRITE_NR");
+    charCallbacks = new MyBLECharacteristicCallbacks();
+    pTxCharacteristic->setCallbacks(charCallbacks);
+    pRxCharacteristic = pTxCharacteristic;
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    if (pAdvertising == nullptr) {
+        writeSerial("ERROR: Failed to get advertising object");
+        return;
+    }
+    pAdvertising->addServiceUUID(serviceUUID);
+    writeSerial("Service UUID added to advertising");
+    // Add manufacturer data
+    BLEAdvertisementData advertisementData;
+    uint8_t msd_payload[13];
+    uint16_t msd_cid = 0x1337;
+    memset(msd_payload, 0, sizeof(msd_payload));
+    memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
+    msd_payload[2] = 0x02;
+    msd_payload[3] = 0x36;
+    msd_payload[4] = 0x00;
+    msd_payload[5] = 0x6C;
+    msd_payload[6] = 0x00;
+    msd_payload[7] = 0xC3;
+    msd_payload[8] = 0x01;
+    msd_payload[9] = 0xB9;
+    msd_payload[10] = 0x0B;
+    msd_payload[11] = 0x12;
+    msd_payload[12] = 0xA6;
+    String manufacturerDataStr;
+    for (int i = 0; i < 13; i++) {
+        manufacturerDataStr += (char)msd_payload[i];
+    }
+    advertisementData.setManufacturerData(manufacturerDataStr);
+    pAdvertising->setAdvertisementData(advertisementData);
+    writeSerial("Manufacturer data added to advertising");
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x0006);
+    pAdvertising->setMinPreferred(0x0012);
+    writeSerial("Advertising intervals set");
+    pServer->getAdvertising()->setMinPreferred(0x06);
+    pServer->getAdvertising()->setMinPreferred(0x12);
+    pServer->getAdvertising()->start();
+    writeSerial("=== BLE advertising started successfully ===");
+    writeSerial("Device ready: " + deviceName);
+    writeSerial("Waiting for BLE connections...");
+#endif
 }
 
 void pwrmgm(bool onoff){
+    if(globalConfig.display_count == 0){
+        writeSerial("No display configured");
+        return;
+    }
+    if(globalConfig.system_config.pwr_pin != 0xFF){
+    #ifdef TARGET_ESP32
+    //no propper sleep implemented yet for ESP32
+    digitalWrite(globalConfig.system_config.pwr_pin, HIGH);
+    #endif
+    #ifdef TARGET_NRF
     if(onoff){
-        digitalWrite(PowerPin, HIGH);
-        pinMode(RESET_PIN, OUTPUT);
-        pinMode(CS_PIN, OUTPUT);
-        pinMode(DC_PIN, OUTPUT);
-        pinMode(CLK_PIN, OUTPUT);
-        pinMode(MOSI_PIN, OUTPUT);
+        digitalWrite(globalConfig.system_config.pwr_pin, HIGH);
+        pinMode(globalConfig.displays[0].reset_pin, OUTPUT);
+        pinMode(globalConfig.displays[0].cs_pin, OUTPUT);
+        pinMode(globalConfig.displays[0].dc_pin, OUTPUT);
+        pinMode(globalConfig.displays[0].clk_pin, OUTPUT);
+        pinMode(globalConfig.displays[0].data_pin, OUTPUT);
         delay(200);
     }
     else{
-        pinMode(RESET_PIN, INPUT);
-        pinMode(CS_PIN, INPUT);
-        pinMode(DC_PIN, INPUT);
-        pinMode(CLK_PIN, INPUT);
-        pinMode(MOSI_PIN, INPUT);
-        digitalWrite(PowerPin, LOW);
+        pinMode(globalConfig.displays[0].reset_pin, INPUT);
+        pinMode(globalConfig.displays[0].cs_pin, INPUT);
+        pinMode(globalConfig.displays[0].dc_pin, INPUT);
+        pinMode(globalConfig.displays[0].clk_pin, INPUT);
+        pinMode(globalConfig.displays[0].data_pin, INPUT);
+        digitalWrite(globalConfig.system_config.pwr_pin, LOW);
     }
-}
-
-void loop() {
-    if (currentImage.ready) {
-        writeSerial("Processing received image...");
-        displayReceivedImage();
-        currentImage.ready = false;
-        cleanupImageMemory();
-        writeSerial("Image processing complete");
+    #endif
     }
-    delay(2000);
-    writeSerial("Loop end: " + String(millis() / 100));
+   else{
+    writeSerial("Power pin not set");
+   }
 }
 
-void writeSerial(String message, bool newLine) {
-        if (newLine == true)
-        {
-            Serial.println(message);
-        }
-        else
-        {
-            Serial.print(message);
-        }
+void writeSerial(String message, bool newLine){
+    if (newLine == true) Serial.println(message);
+    else Serial.print(message);
 }
 
-void initDisplay() {
+void initDisplay(){
     writeSerial("=== Initializing Display ===");
-    if(display_count > 0){
+    if(globalConfig.display_count > 0){
     pwrmgm(true);
-    epd.initIO(DC_PIN, RESET_PIN, BUSY_PIN, CS_PIN, MOSI_PIN, CLK_PIN);
-
-    writeSerial(String("DC_PIN: ") + String(DC_PIN));
-    writeSerial(String("RESET_PIN: ") + String(RESET_PIN));
-    writeSerial(String("BUSY_PIN: ") + String(BUSY_PIN));
-    writeSerial(String("CS_PIN: ") + String(CS_PIN));
-    writeSerial(String("MOSI_PIN: ") + String(MOSI_PIN));
-    writeSerial(String("CLK_PIN: ") + String(CLK_PIN));
-
+    epd = BBEPAPER(globalConfig.displays[0].panel_ic_type);
+    epd.setRotation(globalConfig.displays[0].rotation * 90);
+    epd.initIO(globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin);
     writeSerial(String("Height: ") + String(epd.height()));
     writeSerial(String("Width: ") + String(epd.width()));
-
     epd.allocBuffer();
-    if(Color_Scheme == 1)epd.allocBuffer(true);
-    //Rotation_Map
+    if(globalConfig.displays[0].color_scheme == 1)epd.allocBuffer(true);
     epd.fillScreen(BBEP_WHITE);
     epd.setTextColor(BBEP_BLACK, BBEP_WHITE);
-    epd.setFont(FONT_12x16);
     String chipId = getChipIdHex();
-    //epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_BLACK);
     writeSerial("Chip ID for display: " + chipId);
-    //epd.setCursor(100, 100); 
-    //epd.print("openepaperlink.org");
-    //epd.setCursor(100, 200); 
-    //epd.print("Name: OEPL"+ chipId);
-    //epd.setCursor(100, 300); 
-    //epd.print("Epaper driver by Larry Bank https://github.com/bitbank2");
-
-    epd.setCursor(10, 10); 
-    epd.print("Test");
+    if(epd.width() > 500){
+    epd.setFont(FONT_12x16);
+    epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_BLACK);
+    epd.setCursor(100, 100); 
+    epd.print("openepaperlink.org");
+    epd.setCursor(100, 200); 
+    epd.print("Name: OEPL"+ chipId);
+    epd.setCursor(100, 300); 
+    epd.print("Epaper driver by Larry Bank https://github.com/bitbank2");
+    }
+    else{
+    epd.setFont(FONT_6x8);
+    epd.setCursor(0, 0); 
+    epd.print("openepaperlink.org");
+    epd.setCursor(0, 10); 
+    epd.print("Name: OEPL"+ chipId);
+    epd.setCursor(0, 20); 
+    epd.print("Epaper driver by");
+    epd.setCursor(0, 30); 
+    epd.print("Larry Bank");
+    epd.setCursor(0, 40); 
+    epd.print("github.com/bitbank2");
+    }
+    writeSerial("Writing plane...");
     epd.writePlane();
+    writeSerial("Refreshing display...");
+    #ifdef TARGET_ESP32
+    //no propper sleep implemented yet for ESP32
     epd.refresh(REFRESH_FULL, false);
-    delay(20000);
+    delay(10000);
+    #endif
+    #ifdef TARGET_NRF
+    epd.refresh(REFRESH_FULL, true);
+    delay(2000);
+    #endif
+    uint16_t newrotation = globalConfig.displays[0].rotation * 90 + 270;
+    if(newrotation >= 360)newrotation = newrotation - 360;
+    epd.setRotation(newrotation);    
     pwrmgm(false);
     }
     else{
@@ -224,6 +420,7 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 }
 
 String getChipIdHex() {
+    #ifdef TARGET_NRF
     uint32_t id1 = NRF_FICR->DEVICEID[0];
     uint32_t id2 = NRF_FICR->DEVICEID[1]; 
     uint32_t last3Bytes = id2 & 0xFFFFFF;
@@ -235,14 +432,30 @@ String getChipIdHex() {
     writeSerial("Chip ID: " + String(id1, HEX) + String(id2, HEX));
     writeSerial("Using last 3 bytes: " + hexId);
     return hexId;
+    #endif
+    #ifdef TARGET_ESP32
+    uint64_t macAddress = ESP.getEfuseMac();
+    uint32_t chipId = (uint32_t)(macAddress >> 24) & 0xFFFFFF;
+    String hexId = String(chipId, HEX);
+    hexId.toUpperCase();
+    while (hexId.length() < 6) {
+        hexId = "0" + hexId;
+    }
+    writeSerial("Chip ID: " + String(chipId, HEX));
+    writeSerial("Using chip ID: " + hexId);
+    return hexId;
+    #endif
 }
 
-void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+#ifdef TARGET_NRF
+void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len){
+#else
+void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len){
+#endif
     if (len < 2) {
         writeSerial("ERROR: Command too short (" + String(len) + " bytes)");
         return;
     }
-    
     uint16_t command = (data[0] << 8) | data[1];  // Fixed byte order
     writeSerial("Processing command: 0x" + String(command, HEX));
     switch (command) {
@@ -272,10 +485,8 @@ void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, 
             handleBlockData(data + 2, len - 2);
             break;
         case 0x0002: // Start sending packets for current block
-            {
-                writeSerial("=== START PACKETS COMMAND (0x0002) ===");
-                writeSerial("Web tool ready to send packets for block " + String(currentImage.currentBlock));
-            }
+            writeSerial("=== START PACKETS COMMAND (0x0002) ===");
+            writeSerial("Web tool ready to send packets for block " + String(currentImage.currentBlock));
             break;
         case 0x0003: // Finalization command
             {
@@ -293,19 +504,28 @@ void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, 
             writeSerial("=== DISPLAY INFO COMMAND (0x0005) ===");
             handleDisplayInfo();
             break;
-            break;
         case 0x000F: // Reboot
             writeSerial("=== Reboot COMMAND (0x000F) ===");
             delay(100);
-            NVIC_SystemReset();
+            reboot();
             break;
         default:
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
             writeSerial("Expected: 0x0011 (read config), 0x0064 (image info), 0x0065 (block data), or 0x0003 (finalize)");
             break;
     }
-    
     writeSerial("Command processing completed successfully");
+}
+
+void reboot(){
+    writeSerial("=== REBOOT COMMAND (0x000F) ===");
+    delay(100);
+    #ifdef TARGET_NRF
+    NVIC_SystemReset();
+    #endif
+    #ifdef TARGET_ESP32
+    esp_restart();
+    #endif
 }
 
 void handleImageInfo(uint8_t* data, uint16_t len) {
@@ -333,14 +553,11 @@ void handleImageInfo(uint8_t* data, uint16_t len) {
     writeSerial("  Data type arg: 0x" + String(dataTypeArg, HEX));
     writeSerial("  Next check in: " + String(nextCheckIn));
     writeSerial("Setting up image data buffer...");
-    // Clean up any existing image data first
     cleanupImageMemory();
-    // Check if image fits in global buffer
     if (dataSize > MAX_IMAGE_SIZE) {
         writeSerial("ERROR: Image too large (" + String(dataSize) + " bytes, max: " + String(MAX_IMAGE_SIZE) + " bytes)");
         return;
     }
-    // Use global buffer
     currentImage.data = imageDataBuffer;
     writeSerial("Using global image buffer: " + String(dataSize) + " bytes");
     currentImage.size = dataSize;
@@ -359,17 +576,14 @@ void handleImageInfo(uint8_t* data, uint16_t len) {
     currentImage.totalBlocks = (dataSize + BLOCK_DATA_SIZE - 1) / BLOCK_DATA_SIZE; // Ceiling division
     currentImage.currentBlock = 0xFFFFFFFF; // Initialize to invalid value to detect first block
     writeSerial("Calculated blocks needed: " + String(currentImage.totalBlocks) + " (data size: " + String(dataSize) + " bytes, block size: " + String(BLOCK_DATA_SIZE) + " bytes)");
-    // Check if we have enough blocks in global array
     if (currentImage.totalBlocks > MAX_BLOCKS) {
         writeSerial("ERROR: Too many blocks (" + String(currentImage.totalBlocks) + ", max: " + String(MAX_BLOCKS) + ")");
         cleanupImageMemory();
         return;
     }
-    // Use global block tracking arrays
     currentImage.blocksReceived = blocksReceived;
     currentImage.blockBytesReceived = blockBytesReceived;
     currentImage.blockPacketsReceived = blockPacketsReceived;
-    // Initialize block tracking
     for (uint32_t i = 0; i < currentImage.totalBlocks; i++) {
         currentImage.blocksReceived[i] = false;
         currentImage.blockBytesReceived[i] = 0;
@@ -389,7 +603,7 @@ void handleImageInfo(uint8_t* data, uint16_t len) {
     sendResponse(response, 19);
 }
 
-void handleBlockData(uint8_t* data, uint16_t len) {
+void handleBlockData(uint8_t* data, uint16_t len){
     if (len < 4) {
         writeSerial("ERROR: Block data too short (" + String(len) + " bytes, need 4)");
         return;
@@ -496,12 +710,10 @@ void handleBlockData(uint8_t* data, uint16_t len) {
     }
 }
 
-void sendResponse(uint8_t* response, uint8_t len) {
+void sendResponse(uint8_t* response, uint8_t len){
     writeSerial("Sending BLE response:");
     writeSerial("  Length: " + String(len) + " bytes");
     writeSerial("  Command: 0x" + String(response[0], HEX) + String(response[1], HEX));
-    
-    // Dump full command bytes
     String hexDump = "  Full command: ";
     for (int i = 0; i < len; i++) {
         if (i > 0) hexDump += " ";
@@ -509,8 +721,21 @@ void sendResponse(uint8_t* response, uint8_t len) {
         hexDump += String(response[i], HEX);
     }
     writeSerial(hexDump);
-    
+    #ifdef TARGET_NRF
     imageCharacteristic.notify(response, len);
+    writeSerial("Response notified (nRF52)");
+    #endif
+    #ifdef TARGET_ESP32
+    if (pTxCharacteristic) {
+        writeSerial("ESP32: Setting characteristic value...");
+        pTxCharacteristic->setValue(response, len);
+        // Need to explicitly notify for ESP32
+        pTxCharacteristic->notify(true);
+        writeSerial("SetValue and notify called successfully");
+    } else {
+        writeSerial("ERROR: pTxCharacteristic is null");
+    }
+    #endif
     delay(20);
     writeSerial("Response sent successfully");
 }
@@ -546,105 +771,20 @@ void displayReceivedImage() {
     writeSerial("  Dimensions: " + String(currentImage.width) + "x" + String(currentImage.height));
     writeSerial("  Received: " + String(currentImage.received) + " bytes");
     pwrmgm(true);
-    epd.initIO(DC_PIN, RESET_PIN, BUSY_PIN, CS_PIN, MOSI_PIN, CLK_PIN);
+    epd.initIO(globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin);
     drawImageData();
     epd.writePlane();
+    #ifdef TARGET_ESP32
+    epd.refresh(REFRESH_FULL, false);
+    delay(10000);
+    #endif
+    #ifdef TARGET_NRF
     epd.refresh(REFRESH_FULL, true);
+    delay(2000);
+    #endif
     epd.sleep(DEEP_SLEEP);
     pwrmgm(false);
     writeSerial("=== IMAGE DISPLAY COMPLETE ===");
-}
-
-bool decompressImageData(uint8_t** output, uint32_t* outputSize) {
-    writeSerial("Starting uzlib decompression...");
-    // Read 4-byte header (expected uncompressed size)
-    uint32_t originalLength = 0;
-    memcpy(&originalLength, currentImage.data, sizeof(originalLength));
-    if (originalLength == 0 || originalLength > 512000) {
-        writeSerial("ERROR: Invalid decompressed size: " + String(originalLength));
-        return false;
-    }
-    writeSerial("Header indicates decompressed size: " + String(originalLength) + " bytes");
-    // Allocate final output buffer (for compatibility)
-    // We'll still fill it in chunks.
-    *output = (uint8_t*)malloc(originalLength);
-    if (!*output) {
-        writeSerial("ERROR: Failed to allocate memory for output buffer.");
-        return false;
-    }
-    *outputSize = originalLength;
-    const uint8_t* compressed = currentImage.data + 4;
-    uint32_t compressedSize = currentImage.size - 4;
-    writeSerial("Compressed data size: " + String(compressedSize) + " bytes");
-    writeSerial("Total received data: " + String(currentImage.size) + " bytes");
-    struct uzlib_uncomp d;
-    memset(&d, 0, sizeof(d));
-    d.source = compressed;
-    d.source_limit = compressed + compressedSize;
-    d.source_read_cb = NULL;
-    uzlib_init();
-    int hdr = uzlib_zlib_parse_header(&d);
-    if (hdr < 0) {
-        writeSerial("ERROR: Invalid zlib header: " + String(hdr));
-        free(*output);
-        *output = nullptr;
-        return false;
-    }
-    uint16_t window = 0x100 << hdr;
-    if (window > 32768) window = 32768;
-    uint8_t* dict = (uint8_t*)malloc(window);
-    if (!dict) {
-        writeSerial("ERROR: Failed to allocate dictionary buffer.");
-        free(*output);
-        *output = nullptr;
-        return false;
-    }
-    uzlib_uncompress_init(&d, dict, window);
-    // streaming buffer (small chunk)
-    uint8_t* chunk = (uint8_t*)malloc(DECOMP_CHUNK);
-    if (!chunk) {
-        writeSerial("ERROR: Failed to allocate chunk buffer.");
-        free(dict);
-        free(*output);
-        *output = nullptr;
-        return false;
-    }
-    uint32_t totalOut = 0;
-    int res;
-    do {
-        d.dest_start = chunk;
-        d.dest = chunk;
-        d.dest_limit = chunk + DECOMP_CHUNK;
-        res = uzlib_uncompress(&d);
-        size_t bytesOut = d.dest - d.dest_start;
-        // Copy chunk into final buffer (compatibility mode)
-        if (bytesOut > 0) {
-            // Ensure we don't exceed buffer bounds
-            size_t bytesToCopy = min(bytesOut, (size_t)(originalLength - totalOut));
-            if (bytesToCopy > 0) {
-                memcpy(*output + totalOut, chunk, bytesToCopy);
-                totalOut += bytesToCopy;
-            }
-        }
-        if (res == TINF_DATA_ERROR) {
-            writeSerial("ERROR: uzlib data error");
-            break;
-        }
-    } while (res == TINF_OK && totalOut < originalLength);
-    free(chunk);
-    free(dict);
-    if (res != TINF_DONE && res != TINF_OK) {
-        writeSerial("ERROR: uzlib_uncompress() failed with code " + String(res));
-        free(*output);
-        *output = nullptr;
-        return false;
-    }
-    writeSerial("Decompressed successfully: " + String(totalOut) + " bytes");
-    writeSerial("Expected: " + String(originalLength) + " bytes");
-    if (totalOut < originalLength) {
-        writeSerial("WARNING: Decompressed size is " + String(originalLength - totalOut) + " bytes less than expected");
-    }
-    return true;
 }
 
 void drawImageData() {
@@ -670,6 +810,36 @@ void drawImageData() {
             }
         }
     }
+    else if (currentImage.dataType == 0x21) {
+        writeSerial("Colored image detected, drawing with color support...");
+        uint32_t pixelIndex = 0;
+        uint32_t redPlaneOffset = currentImage.size / 2; // Second half contains red plane data
+        for (uint16_t y = 0; y < displayWidth; y++) {
+            for (uint16_t x = 0; x < displayHeight; x++) {
+                if (pixelIndex >= redPlaneOffset) break;
+                uint8_t pixelByte = ~currentImage.data[pixelIndex]; // First plane is inverted
+                uint8_t redByte = currentImage.data[pixelIndex + redPlaneOffset];
+                for (int bit = 7; bit >= 0; bit--) {
+                    if (x >= displayHeight) break;
+                    
+                    bool whiteBit = (pixelByte >> bit) & 0x01;
+                    bool redBit = (redByte >> bit) & 0x01;
+                    if (whiteBit && redBit) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_RED);
+                    } else if (!whiteBit && redBit) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_YELLOW);
+                    } else if (whiteBit && !redBit) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
+                    } else {
+                        epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
+                    }
+                    x++;
+                }
+                x--;
+                pixelIndex++;
+            }
+        }
+    }
     else if (currentImage.dataType == 0x30) {
         writeSerial("Compressed image detected, decompressing with chunked approach...");
         if (!decompressImageDataChunked()) {
@@ -683,8 +853,8 @@ void drawImageData() {
     }
     writeSerial("Image drawing complete.");
 }
-
-void handleReadDynamicConfig() {
+//legacy function
+void handleReadDynamicConfig(){
     writeSerial("Handling Read Dynamic Config request...");
     uint8_t responseBuffer[94];
     uint16_t responseLen = 0;
@@ -707,8 +877,8 @@ void handleReadDynamicConfig() {
         writeSerial("ERROR: Failed to build Dynamic Config response");
     }
 }
-
-void handleDisplayInfo() {
+//legacy function
+void handleDisplayInfo(){
     writeSerial("Building Display Info response...");
     uint8_t response[33];
     uint16_t offset = 0;
@@ -739,16 +909,16 @@ void handleDisplayInfo() {
     }
     // Offset 30: Color count (1=BW, 2=BWR/BWY, 3=BWRY)
     // Our display is monochrome (black/white only)
-    if(Color_Scheme == 0)response[offset++] = 0x01; // Monochrome
-    else if(Color_Scheme == 1)response[offset++] = 0x02;
+    if(globalConfig.displays[0].color_scheme == 0)response[offset++] = 0x01; // Monochrome
+    else if(globalConfig.displays[0].color_scheme == 1)response[offset++] = 0x02;
     else response[offset++] = 0x00;
     
-    writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: " + String(Color_Scheme));
+    writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: " + String(globalConfig.displays[0].color_scheme));
     // Send the response
     sendResponse(response, sizeof(response));
     writeSerial("Display info response sent");
 }
-
+//legacy function
 void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     writeSerial("Building Dynamic Config response...");
     uint16_t offset = 0;
@@ -771,8 +941,8 @@ void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
-    if(Color_Scheme == 0)buffer[offset++] = 0x01; // Monochrome
-    else if(Color_Scheme == 1)buffer[offset++] = 0x02;
+    if(globalConfig.displays[0].color_scheme == 0)buffer[offset++] = 0x01; // Monochrome
+    else if(globalConfig.displays[0].color_scheme == 1)buffer[offset++] = 0x02;
     else buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
@@ -877,7 +1047,7 @@ void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     writeSerial("Dynamic Config response built successfully (" + String(offset) + " bytes)");
     // Debug: Print first few bytes of config data
     String configDump = "Config data: ";
-    for (uint16_t i = 0; i < min(offset, (uint16_t)16); i++) {
+    for (uint16_t i = 0; i < (offset < 16 ? offset : 16); i++) {
         if (buffer[i] < 0x10) configDump += "0";
         configDump += String(buffer[i], HEX);
     }
@@ -921,7 +1091,7 @@ void cleanupImageMemory() {
     writeSerial("=== MEMORY CLEANUP COMPLETE ===");
 }
 
-bool decompressImageDataChunked() {
+bool decompressImageDataChunked(){
     writeSerial("Starting chunked decompression with direct drawing...");
     uint32_t originalLength = 0;
     memcpy(&originalLength, currentImage.data, sizeof(originalLength));
@@ -955,6 +1125,9 @@ bool decompressImageDataChunked() {
     bool headerParsed = false;
     uint32_t headerBytesReceived = 0;
     uint32_t pixelBytesProcessed = 0;
+    // Buffer for colored image first plane
+    uint8_t* firstPlaneBuffer = nullptr;
+    uint32_t firstPlaneSize = 0;
     writeSerial("Starting chunked decompression and direct drawing...");
     int res;
     do {
@@ -979,18 +1152,68 @@ bool decompressImageDataChunked() {
                         headerParsed = true;
                         writeSerial("Image dimensions: " + String(imgWidth) + "x" + String(imgHeight));
                         writeSerial("Color type: " + String(colorType));
-                        uint16_t drawWidth = min(imgWidth, displayHeight);
-                        uint16_t drawHeight = min(imgHeight, displayWidth);
+                        uint16_t drawWidth = (imgWidth < displayWidth) ? imgWidth : displayWidth;
+                        uint16_t drawHeight = (imgHeight < displayHeight) ? imgHeight : displayHeight;
                         writeSerial("Drawing bounds: " + String(drawWidth) + "x" + String(drawHeight));
+                        
+                        // Allocate buffer for colored image first plane
+                        if (colorType == 2) {
+                            firstPlaneSize = (imgWidth * imgHeight) / 8;
+                            firstPlaneBuffer = (uint8_t*)malloc(firstPlaneSize);
+                            if (!firstPlaneBuffer) {
+                                writeSerial("ERROR: Failed to allocate first plane buffer");
+                                return false;
+                            }
+                            writeSerial("Allocated first plane buffer: " + String(firstPlaneSize) + " bytes");
+                        }
                     }
                 } else {
                     uint32_t pixelByteIndex = pixelBytesProcessed;
                     uint16_t y = pixelByteIndex / (imgWidth / 8);
                     uint16_t x = (pixelByteIndex % (imgWidth / 8)) * 8;
-                    for (int bit = 7; bit >= 0; bit--) {
-                        if (y < min(imgHeight, displayWidth) && x + (7-bit) < min(imgWidth, displayHeight)) {
-                            bool pixelValue = (byte >> bit) & 0x01;
-                            epd.drawPixel(displayWidth - y, x + (7-bit), pixelValue ? BBEP_BLACK : BBEP_WHITE);
+                    
+                    if (colorType == 1) {
+                        // Monochrome image
+                        for (int bit = 7; bit >= 0; bit--) {
+                            if (y < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && x + (7-bit) < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
+                                bool pixelValue = (byte >> bit) & 0x01;
+                                epd.drawPixel(displayWidth - y, x + (7-bit), pixelValue ? BBEP_BLACK : BBEP_WHITE);
+                            }
+                        }
+                    } else if (colorType == 2) {
+                        // Colored image - dual plane encoding
+                        uint32_t redPlaneOffset = firstPlaneSize;
+                        if (pixelByteIndex < redPlaneOffset) {
+                            // First plane (inverted white/black data) - store in buffer
+                            if (pixelByteIndex < firstPlaneSize) {
+                                firstPlaneBuffer[pixelByteIndex] = byte;
+                            }
+                        } else {
+                            // Second plane (red/yellow data) - combine with first plane
+                            uint32_t firstPlaneIndex = pixelByteIndex - redPlaneOffset;
+                            if (firstPlaneIndex < firstPlaneSize) {
+                                uint8_t firstPlaneByte = firstPlaneBuffer[firstPlaneIndex];
+                                uint8_t invertedFirstPlane = ~firstPlaneByte;
+                                uint16_t firstPlaneY = firstPlaneIndex / (imgWidth / 8);
+                                uint16_t firstPlaneX = (firstPlaneIndex % (imgWidth / 8)) * 8;
+                                
+                                for (int bit = 7; bit >= 0; bit--) {
+                                    if (firstPlaneY < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && firstPlaneX + (7-bit) < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
+                                        bool whiteBit = (invertedFirstPlane >> bit) & 0x01;
+                                        bool redBit = (byte >> bit) & 0x01;
+                                        
+                                        if (whiteBit && redBit) {
+                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_RED);
+                                        } else if (!whiteBit && redBit) {
+                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_YELLOW);
+                                        } else if (whiteBit && !redBit) {
+                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_WHITE);
+                                        } else {
+                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_BLACK);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     pixelBytesProcessed++;
@@ -1006,6 +1229,13 @@ bool decompressImageDataChunked() {
     writeSerial("Chunked decompression complete: " + String(totalDecompressed) + " bytes");
     writeSerial("Expected: " + String(originalLength) + " bytes");
     writeSerial("Pixel bytes processed: " + String(pixelBytesProcessed));
+    
+    // Cleanup allocated buffer
+    if (firstPlaneBuffer) {
+        free(firstPlaneBuffer);
+        writeSerial("Freed first plane buffer");
+    }
+    
     if (res != TINF_DONE && res != TINF_OK) {
         writeSerial("ERROR: uzlib_uncompress() failed with code " + String(res));
         return false;
@@ -1013,104 +1243,86 @@ bool decompressImageDataChunked() {
     return true;
 }
 
-bool initConfigStorage() {
+bool initConfigStorage(){
     writeSerial("=== INIT CONFIG STORAGE DEBUG ===");
-    
-    // Mount the internal file system
+    #ifdef TARGET_NRF
     if (!InternalFS.begin()) {
         writeSerial("ERROR: Failed to mount internal file system");
         return false;
     }
-    
     writeSerial("Internal file system mounted successfully");
-
-    //InternalFS.format();
-    
-    // Test file system operations
-    writeSerial("Testing file system operations...");
-    
-    // Test creating a simple file
-    File testFile = InternalFS.open("/test.txt", Adafruit_LittleFS_Namespace::FILE_O_WRITE);
-    if (testFile) {
-        writeSerial("Test file created successfully");
-        size_t testWritten = testFile.write("Hello World", 11);
-        writeSerial("Test bytes written: " + String(testWritten));
-        testFile.close();
-        
-        // Test reading the file
-        File readFile = InternalFS.open("/test.txt", Adafruit_LittleFS_Namespace::FILE_O_READ);
-        if (readFile) {
-            writeSerial("Test file read successfully");
-            char buffer[20];
-            size_t testRead = readFile.read((uint8_t*)buffer, 11);
-            buffer[11] = '\0';
-            writeSerial("Test bytes read: " + String(testRead) + " - Content: " + String(buffer));
-            readFile.close();
-    } else {
-            writeSerial("ERROR: Failed to read test file");
-        }
-        
-        // Clean up test file
-        InternalFS.remove("/test.txt");
-        writeSerial("Test file cleaned up");
-            } else {
-        writeSerial("ERROR: Failed to create test file");
+    return true;
+    #endif
+    #ifdef TARGET_ESP32
+    if (!LittleFS.begin(true)) { // true = format on failure
+        writeSerial("ERROR: Failed to mount LittleFS");
         return false;
     }
-    
-    writeSerial("File system test completed successfully");
+    writeSerial("LittleFS mounted successfully");
     return true;
+    #endif
+    return false; // Should never reach here
 }
 
-bool saveConfig(uint8_t* configData, uint32_t len) {
+void formatConfigStorage(){
+    writeSerial("=== FORMAT CONFIG STORAGE DEBUG ===");
+    #ifdef TARGET_NRF
+    InternalFS.format();
+    writeSerial("Internal file system formatted successfully");
+    #endif
+    #ifdef TARGET_ESP32
+    LittleFS.format();
+    writeSerial("LittleFS formatted successfully");
+    #endif
+}
+
+bool saveConfig(uint8_t* configData, uint32_t len){
     writeSerial("=== SAVE CONFIG DEBUG ===");
     writeSerial("Input data length: " + String(len) + " bytes");
-    
     if (len > MAX_CONFIG_SIZE) {
         writeSerial("ERROR: Config data too large (" + String(len) + " bytes)");
         return false;
     }
-    
-    // Create config storage structure
     static config_storage_t config;
     config.magic = 0xDEADBEEF;
     config.version = 1;
     config.data_len = len;
     config.crc = calculateConfigCRC(configData, len);
     memcpy(config.data, configData, len);
-    
     writeSerial("Config structure created:");
     writeSerial("  Magic: 0x" + String(config.magic, HEX));
     writeSerial("  Version: " + String(config.version));
     writeSerial("  Data length: " + String(config.data_len));
     writeSerial("  CRC: 0x" + String(config.crc, HEX));
-    
-    // Calculate sizes
     size_t headerSize = sizeof(config_storage_t) - MAX_CONFIG_SIZE; // Size without data array
     size_t totalSize = headerSize + len; // Header + actual data length
     size_t fullStructSize = sizeof(config_storage_t);
-    
     writeSerial("Size calculations:");
     writeSerial("  Header size: " + String(headerSize) + " bytes");
     writeSerial("  Total size to write: " + String(totalSize) + " bytes");
     writeSerial("  Full struct size: " + String(fullStructSize) + " bytes");
     writeSerial("  MAX_CONFIG_SIZE: " + String(MAX_CONFIG_SIZE) + " bytes");
-    
-    // Try different file modes
     writeSerial("Opening file: " + String(CONFIG_FILE_PATH));
-    
-    // First try to remove existing file
+    #ifdef TARGET_NRF
     if (InternalFS.exists(CONFIG_FILE_PATH)) {
         writeSerial("Removing existing file...");
         InternalFS.remove(CONFIG_FILE_PATH);
     }
-    
-    // Try opening with write mode
-    File file = InternalFS.open(CONFIG_FILE_PATH, Adafruit_LittleFS_Namespace::FILE_O_WRITE);
+    File file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_WRITE);
+    #elif defined(TARGET_ESP32)
+    if (LittleFS.exists(CONFIG_FILE_PATH)) {
+        writeSerial("Removing existing file...");
+        LittleFS.remove(CONFIG_FILE_PATH);
+    }
+    File file = LittleFS.open(CONFIG_FILE_PATH, FILE_WRITE);
+    #endif
     if (!file) {
-        writeSerial("ERROR: Failed to open config file for writing with FILE_O_WRITE");
-        // Try with create mode
-        file = InternalFS.open(CONFIG_FILE_PATH, Adafruit_LittleFS_Namespace::FILE_O_WRITE);
+        writeSerial("ERROR: Failed to open config file for writing");
+        #ifdef TARGET_NRF
+        file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_WRITE);
+        #elif defined(TARGET_ESP32)
+        file = LittleFS.open(CONFIG_FILE_PATH, FILE_WRITE);
+        #endif
         if (!file) {
             writeSerial("ERROR: Failed to open config file for writing with CREATE|WRITE");
         return false;
@@ -1119,90 +1331,69 @@ bool saveConfig(uint8_t* configData, uint32_t len) {
     } else {
         writeSerial("File opened successfully with WRITE mode");
     }
-    
-    // Write config data (only the used portion of the structure)
     writeSerial("Writing " + String(totalSize) + " bytes to file...");
     size_t bytesWritten = file.write((uint8_t*)&config, totalSize);
     writeSerial("Bytes written: " + String(bytesWritten));
-    
-    // Check file size after write
     file.seek(0);
     size_t fileSize = file.size();
     writeSerial("File size after write: " + String(fileSize) + " bytes");
-    
     file.close();
     writeSerial("File closed");
-    
     if (bytesWritten != totalSize) {
         writeSerial("ERROR: Failed to write complete config data (expected " + String(totalSize) + ", wrote " + String(bytesWritten) + ")");
         return false;
     }
-    
     writeSerial("Config saved successfully (" + String(len) + " bytes)");
     return true;
 }
 
-bool loadConfig(uint8_t* configData, uint32_t* len) {
-
-    File file = InternalFS.open(CONFIG_FILE_PATH, Adafruit_LittleFS_Namespace::FILE_O_READ);
+bool loadConfig(uint8_t* configData, uint32_t* len){
+    #ifdef TARGET_NRF
+    File file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_READ);
+    #elif defined(TARGET_ESP32)
+    File file = LittleFS.open(CONFIG_FILE_PATH, FILE_READ);
+    #endif
     if (!file) {
         writeSerial("No config file found");
         return false;
     }
-    
-    // Read config storage structure header first
     static config_storage_t config;
     static size_t bytesRead;
     static size_t headerSize = sizeof(config_storage_t) - MAX_CONFIG_SIZE; // Size without data array
     writeSerial("Reading config header...");
     writeSerial("  Header size: " + String(headerSize) + " bytes");
-    
     bytesRead = file.read((uint8_t*)&config, headerSize);
     writeSerial("  Bytes read: " + String(bytesRead) + " bytes");
-    
     if (bytesRead != headerSize) {
         writeSerial("ERROR: Failed to read config header (expected " + String(headerSize) + ", got " + String(bytesRead) + ")");
         file.close();
         return false;
     }
-    
-    // Validate magic number before reading data
     if (config.magic != 0xDEADBEEF) {
         writeSerial("ERROR: Invalid config magic number");
         file.close();
         return false;
     }
-    
-    // Check data length before reading
     if (config.data_len > MAX_CONFIG_SIZE) {
         writeSerial("ERROR: Config data too large");
         file.close();
         return false;
     }
-    
-    // Read the actual data portion
     bytesRead = file.read(config.data, config.data_len);
-
     file.flush();
     file.close();
-    
     if (bytesRead != config.data_len) {
         writeSerial("ERROR: Failed to read complete config data (expected " + String(config.data_len) + ", read " + String(bytesRead) + ")");
         return false;
     }
-    
-    // Validate CRC
     uint32_t calculatedCRC = calculateConfigCRC(config.data, config.data_len);
     if (config.crc != calculatedCRC) {
         writeSerial("ERROR: Config CRC mismatch");
         return false;
     }
-    
-    // Copy data to output buffer - byte by byte with debugging
     writeSerial("Starting individual byte copy...");
     writeSerial("  Source data length: " + String(config.data_len) + " bytes");
     writeSerial("  Destination buffer size: " + String(*len) + " bytes");
-    
     for (uint32_t i = 0; i < config.data_len; i++) {
         if (i < *len) {  // Safety check to prevent buffer overflow
             configData[i] = config.data[i];
@@ -1211,18 +1402,15 @@ bool loadConfig(uint8_t* configData, uint32_t* len) {
         return false;
         }
     }
-    
     *len = config.data_len;
-    
     writeSerial("Individual byte copy completed");
     writeSerial("  Final length: " + String(*len) + " bytes");
     writeSerial("Config loaded successfully (" + String(config.data_len) + " bytes) - from loadConfig function");
     return true;
 }
 
-uint32_t calculateConfigCRC(uint8_t* data, uint32_t len) {
+uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
     uint32_t crc = 0xFFFFFFFF;
-    
     for (uint32_t i = 0; i < len; i++) {
         crc ^= data[i];
         for (int j = 0; j < 8; j++) {
@@ -1233,174 +1421,119 @@ uint32_t calculateConfigCRC(uint8_t* data, uint32_t len) {
             }
         }
     }
-    
     return ~crc;
 }
 
-void handleReadConfig() {
-    
+void handleReadConfig(){
     uint8_t configData[MAX_CONFIG_SIZE];
-    uint32_t configLen = MAX_CONFIG_SIZE;  // Initialize with max buffer size
-    
+    uint32_t configLen = MAX_CONFIG_SIZE;
     if (loadConfig(configData, &configLen)) {
         writeSerial("Sending config data in chunks...");
-        
-        // Send config data in chunks
         uint32_t remaining = configLen;
         uint32_t offset = 0;
         uint16_t chunkNumber = 0;
-        const uint16_t maxChunks = 10; // Safety limit
-        
+        const uint16_t maxChunks = 10;
         while (remaining > 0 && chunkNumber < maxChunks) {
-            // Use global buffer to avoid stack allocation issues
             uint16_t responseLen = 0;
-            
-            // Add command response header
             configReadResponseBuffer[responseLen++] = 0x00; // Response type
             configReadResponseBuffer[responseLen++] = 0x40; // Command echo
-            
-            // Add chunk number (2 bytes, little endian)
             configReadResponseBuffer[responseLen++] = chunkNumber & 0xFF;
             configReadResponseBuffer[responseLen++] = (chunkNumber >> 8) & 0xFF;
-            
-            // Add total length (2 bytes, little endian) - only in first chunk
             if (chunkNumber == 0) {
                 configReadResponseBuffer[responseLen++] = configLen & 0xFF;
                 configReadResponseBuffer[responseLen++] = (configLen >> 8) & 0xFF;
             }
-            
-            // Calculate chunk size (use very small chunks to avoid crashes)
-            uint16_t maxDataSize = 100 - responseLen; // Use 100 bytes max per chunk
-            uint16_t chunkSize = min(remaining, (uint32_t)maxDataSize);
-            
-            // Safety check
+            uint16_t maxDataSize = 100 - responseLen;
+            uint16_t chunkSize = (remaining < maxDataSize) ? remaining : maxDataSize;
             if (chunkSize == 0) {
                 writeSerial("ERROR: Chunk size is 0, breaking");
                 break;
             }
-            
-            // Add config data
             memcpy(configReadResponseBuffer + responseLen, configData + offset, chunkSize);
             responseLen += chunkSize;
-            
-            // Safety checks before sending
             if (responseLen > 100) {
                 writeSerial("ERROR: Response too large (" + String(responseLen) + " bytes), skipping");
                 break;
             }
-            
             if (responseLen == 0) {
                 writeSerial("ERROR: Empty response, skipping");
                 break;
             }
-            
-            // Send chunk using sendResponse
             sendResponse(configReadResponseBuffer, responseLen);
-            
-            // Update counters
-        offset += chunkSize;
+            offset += chunkSize;
             remaining -= chunkSize;
             chunkNumber++;
-            
             writeSerial("Sent chunk " + String(chunkNumber) + " (" + String(chunkSize) + " bytes)");
-            
-            // Small delay after BLE notification
             delay(50);
         }
-        
         if (chunkNumber >= maxChunks) {
             writeSerial("WARNING: Hit chunk limit, transmission may be incomplete");
         }
-        
         writeSerial("Config read response sent (" + String(configLen) + " bytes) in " + String(chunkNumber) + " chunks");
     } else {
-        // Send error response
         uint8_t errorResponse[] = {0xFF, 0x40, 0x00, 0x00}; // Error, command, no data
         sendResponse(errorResponse, sizeof(errorResponse));
         writeSerial("Config read failed - sent error response");
     }
-    
-    // Add some debugging to see if we can identify where the crash happens
     writeSerial("About to return from handleReadConfig");
     delay(100);
     writeSerial("handleReadConfig function completed successfully");
 }
 
-void handleWriteConfig(uint8_t* data, uint16_t len) {
+void handleWriteConfig(uint8_t* data, uint16_t len){
     if (len == 0) {
         writeSerial("ERROR: No config data received");
         return;
     }
-    
-    // Check if this is a chunked write (either too large for single transmission or exactly 200+2 bytes indicating first chunk with size)
     if (len > 200 || (len >= 202 && len <= 202)) { // Start chunked write for large data or first chunk with size prefix
         writeSerial("Starting chunked write (received: " + String(len) + " bytes)");
-        
-        // Initialize chunked write state
         chunkedWriteState.active = true;
         chunkedWriteState.receivedSize = 0;
         chunkedWriteState.expectedChunks = 0;
         chunkedWriteState.receivedChunks = 0;
-        
         if (len >= 202) {
-            // First chunk with total size prefix (2 bytes)
             chunkedWriteState.totalSize = data[0] | (data[1] << 8);
-            chunkedWriteState.expectedChunks = (chunkedWriteState.totalSize + 200 - 1) / 200; // Round up division
-            
-            // Copy first chunk data (skip the 2-byte size prefix)
-            uint16_t chunkDataSize = min(len - 2, (uint16_t)200);
+            chunkedWriteState.expectedChunks = (chunkedWriteState.totalSize + 200 - 1) / 200;
+            uint16_t chunkDataSize = ((len - 2) < 200) ? (len - 2) : 200;
             memcpy(chunkedWriteState.buffer, data + 2, chunkDataSize);
             chunkedWriteState.receivedSize = chunkDataSize;
             chunkedWriteState.receivedChunks = 1;
-            
             writeSerial("First chunk received: " + String(chunkDataSize) + " bytes, total size: " + String(chunkedWriteState.totalSize) + " bytes, expected chunks: " + String(chunkedWriteState.expectedChunks));
         } else {
-            // Large single transmission
             chunkedWriteState.totalSize = len;
             chunkedWriteState.expectedChunks = 1;
-            
-            uint16_t chunkSize = min(len, (uint16_t)200);
+            uint16_t chunkSize = (len < 200) ? len : 200;
             memcpy(chunkedWriteState.buffer, data, chunkSize);
             chunkedWriteState.receivedSize = chunkSize;
             chunkedWriteState.receivedChunks = 1;
-            
             writeSerial("Large single transmission: " + String(chunkSize) + " bytes");
         }
-        
-        // Send acknowledgment for first chunk
         uint8_t ackResponse[] = {0x00, 0x41, 0x00, 0x00}; // Success, command, chunk received
         sendResponse(ackResponse, sizeof(ackResponse));
         return;
     }
-    
-    // Single transmission
     if (saveConfig(data, len)) {
-        // Send success response
         uint8_t successResponse[] = {0x00, 0x41, 0x00, 0x00}; // Success, command, no data
         sendResponse(successResponse, sizeof(successResponse));
         writeSerial("Config write successful");
     } else {
-        // Send error response
         uint8_t errorResponse[] = {0xFF, 0x41, 0x00, 0x00}; // Error, command, no data
         sendResponse(errorResponse, sizeof(errorResponse));
         writeSerial("Config write failed");
     }
 }
 
-void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
+void handleWriteConfigChunk(uint8_t* data, uint16_t len){
     if (!chunkedWriteState.active) {
         writeSerial("ERROR: No chunked write in progress");
-        uint8_t errorResponse[] = {0xFF, 0x42, 0x00, 0x00}; // Error, command, no data
+        uint8_t errorResponse[] = {0xFF, 0x42, 0x00, 0x00};
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
-    
     if (len == 0) {
         writeSerial("ERROR: No chunk data received");
         return;
     }
-    
-    // Safety check for chunk size
     if (len > 200) {
         writeSerial("ERROR: Chunk too large (" + String(len) + " bytes)");
         chunkedWriteState.active = false;
@@ -1408,8 +1541,6 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
-    
-    // Check if we have space for this chunk
     if (chunkedWriteState.receivedSize + len > MAX_CONFIG_SIZE) {
         writeSerial("ERROR: Chunk would exceed max config size");
         chunkedWriteState.active = false;
@@ -1417,8 +1548,6 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
-    
-    // Safety check for too many chunks
     if (chunkedWriteState.receivedChunks >= 20) {
         writeSerial("ERROR: Too many chunks received");
         chunkedWriteState.active = false;
@@ -1426,93 +1555,64 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
-    
-    // Copy chunk data
     memcpy(chunkedWriteState.buffer + chunkedWriteState.receivedSize, data, len);
     chunkedWriteState.receivedSize += len;
     chunkedWriteState.receivedChunks++;
-    
     writeSerial("Chunk " + String(chunkedWriteState.receivedChunks) + "/" + String(chunkedWriteState.expectedChunks) + " received (" + String(len) + " bytes)");
-    
-    // Check if we have all chunks
     if (chunkedWriteState.receivedChunks >= chunkedWriteState.expectedChunks) {
         writeSerial("All chunks received, saving config (" + String(chunkedWriteState.receivedSize) + " bytes)");
-        
         if (saveConfig(chunkedWriteState.buffer, chunkedWriteState.receivedSize)) {
-            // Send success response
             uint8_t successResponse[] = {0x00, 0x42, 0x00, 0x00}; // Success, command, no data
             sendResponse(successResponse, sizeof(successResponse));
             writeSerial("Chunked config write successful");
     } else {
-            // Send error response
             uint8_t errorResponse[] = {0xFF, 0x42, 0x00, 0x00}; // Error, command, no data
             sendResponse(errorResponse, sizeof(errorResponse));
             writeSerial("Chunked config write failed");
         }
-        
-        // Reset chunked write state
         chunkedWriteState.active = false;
         chunkedWriteState.receivedSize = 0;
         chunkedWriteState.receivedChunks = 0;
     } else {
-        // Send acknowledgment for chunk
         uint8_t ackResponse[] = {0x00, 0x42, 0x00, 0x00}; // Success, command, chunk received
         sendResponse(ackResponse, sizeof(ackResponse));
     }
 }
 
-bool loadGlobalConfig() {
+bool loadGlobalConfig(){
     writeSerial("Loading global configuration...");
-    
-    // Initialize global config to zero
     memset(&globalConfig, 0, sizeof(globalConfig));
-
-    writeSerial("Memset ");
-    
-    // Load config from storage
     static uint8_t configData[MAX_CONFIG_SIZE];
-    static uint32_t configLen = MAX_CONFIG_SIZE; // Set to max size for loadConfig
-    
+    static uint32_t configLen = MAX_CONFIG_SIZE;
     if (!loadConfig(configData, &configLen)) {
         writeSerial("No config found, using defaults");
         globalConfig.loaded = false;
         return false;
     }
-    
     if (configLen < 3) {
         writeSerial("Config too short, using defaults");
         globalConfig.loaded = false;
         return false;
     }
-    
-    // Parse outer packet structure
     uint32_t offset = 0;
-    
     // Read length (2 bytes, little endian)
     uint16_t packetLength = configData[offset] | (configData[offset + 1] << 8);
     offset += 2;
-    
     // Read version (1 byte)
     globalConfig.version = configData[offset++];
     globalConfig.minor_version = 0; // Not stored in current format
-    
     writeSerial("Config version: " + String(globalConfig.version));
     writeSerial("Config length: " + String(packetLength) + " bytes");
     writeSerial("Struct sizes - SystemConfig: " + String(sizeof(struct SystemConfig)) + 
                ", ManufacturerData: " + String(sizeof(struct ManufacturerData)) + 
                ", PowerOption: " + String(sizeof(struct PowerOption)) + 
                ", DisplayConfig: " + String(sizeof(struct DisplayConfig)));
-    
     // Parse individual packets
     while (offset < configLen - 2) { // -2 for CRC
         if (offset + 2 > configLen - 2) break;
-        
         uint8_t packetNumber = configData[offset++];
         uint8_t packetId = configData[offset++];
-        
         writeSerial("Parsing packet " + String(packetNumber) + " with ID 0x" + String(packetId, HEX) + " at offset " + String(offset - 2));
-        writeSerial("Raw bytes at offset " + String(offset - 2) + ": " + String(configData[offset-2], HEX) + " " + String(configData[offset-1], HEX) + " " + String(configData[offset], HEX) + " " + String(configData[offset+1], HEX) + " " + String(configData[offset+2], HEX) + " " + String(configData[offset+3], HEX) + " " + String(configData[offset+4], HEX) + " " + String(configData[offset+5], HEX));
-        
         switch (packetId) {
             case 0x01: // system_config
                 if (offset + sizeof(struct SystemConfig) <= configLen - 2) {
@@ -1525,7 +1625,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x02: // manufacturer_data
                 if (offset + sizeof(struct ManufacturerData) <= configLen - 2) {
                     memcpy(&globalConfig.manufacturer_data, &configData[offset], sizeof(struct ManufacturerData));
@@ -1537,7 +1636,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x04: // power_option
                 if (offset + sizeof(struct PowerOption) <= configLen - 2) {
                     memcpy(&globalConfig.power_option, &configData[offset], sizeof(struct PowerOption));
@@ -1549,7 +1647,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x20: // display
                 writeSerial("Processing display packet, current count: " + String(globalConfig.display_count));
                 writeSerial("Remaining bytes: " + String(configLen - 2 - offset) + ", needed: " + String(sizeof(struct DisplayConfig)));
@@ -1567,7 +1664,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x21: // led
                 if (globalConfig.led_count < 4 && offset + sizeof(struct LedConfig) <= configLen - 2) {
                     memcpy(&globalConfig.leds[globalConfig.led_count], &configData[offset], sizeof(struct LedConfig));
@@ -1583,7 +1679,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x23: // sensor_data
                 if (globalConfig.sensor_count < 4 && offset + sizeof(struct SensorData) <= configLen - 2) {
                     memcpy(&globalConfig.sensors[globalConfig.sensor_count], &configData[offset], sizeof(struct SensorData));
@@ -1599,7 +1694,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x24: // data_bus
                 if (globalConfig.data_bus_count < 4 && offset + sizeof(struct DataBus) <= configLen - 2) {
                     memcpy(&globalConfig.data_buses[globalConfig.data_bus_count], &configData[offset], sizeof(struct DataBus));
@@ -1615,7 +1709,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             case 0x25: // binary_inputs
                 if (globalConfig.binary_input_count < 4 && offset + sizeof(struct BinaryInputs) <= configLen - 2) {
                     memcpy(&globalConfig.binary_inputs[globalConfig.binary_input_count], &configData[offset], sizeof(struct BinaryInputs));
@@ -1631,7 +1724,6 @@ bool loadGlobalConfig() {
                     return false;
                 }
                 break;
-                
             default:
                 writeSerial("WARNING: Unknown packet ID 0x" + String(packetId, HEX) + ", skipping");
                 // Skip unknown packet - we can't determine its size, so we'll stop parsing
@@ -1639,12 +1731,9 @@ bool loadGlobalConfig() {
                 break;
         }
     }
-    
-    // Verify CRC
     if (offset < configLen - 2) {
         uint16_t crcGiven = configData[configLen - 2] | (configData[configLen - 1] << 8);
         uint16_t crcCalculated = calculateConfigCRC(configData, configLen - 2);
-        
         if (crcGiven != crcCalculated) {
             writeSerial("WARNING: Config CRC mismatch (given: 0x" + String(crcGiven, HEX) + 
                        ", calculated: 0x" + String(crcCalculated, HEX) + ")");
@@ -1652,7 +1741,6 @@ bool loadGlobalConfig() {
             writeSerial("Config CRC verified");
         }
     }
-    
     globalConfig.loaded = true;
     writeSerial("Global config loaded successfully");
     writeSerial("Loaded: " + String(globalConfig.display_count) + " displays, " + 
@@ -1660,21 +1748,18 @@ bool loadGlobalConfig() {
                String(globalConfig.sensor_count) + " sensors, " + 
                String(globalConfig.data_bus_count) + " data buses, " + 
                String(globalConfig.binary_input_count) + " binary inputs");
-    
     return true;
 }
 
-void printConfigSummary() {
+void printConfigSummary(){
     if (!globalConfig.loaded) {
         writeSerial("Config not loaded");
         return;
     }
-    
     writeSerial("=== Configuration Summary ===");
     writeSerial("Version: " + String(globalConfig.version) + "." + String(globalConfig.minor_version));
     writeSerial("Loaded: " + String(globalConfig.loaded ? "Yes" : "No"));
     writeSerial("");
-    
     // System Config
     writeSerial("--- System Configuration ---");
     writeSerial("IC Type: 0x" + String(globalConfig.system_config.ic_type, HEX));
@@ -1682,14 +1767,12 @@ void printConfigSummary() {
     writeSerial("Device Flags: 0x" + String(globalConfig.system_config.device_flags, HEX));
     writeSerial("Power Pin: " + String(globalConfig.system_config.pwr_pin));
     writeSerial("");
-    
     // Manufacturer Data
     writeSerial("--- Manufacturer Data ---");
     writeSerial("Manufacturer ID: 0x" + String(globalConfig.manufacturer_data.manufacturer_id, HEX));
     writeSerial("Board Type: " + String(globalConfig.manufacturer_data.board_type));
     writeSerial("Board Revision: " + String(globalConfig.manufacturer_data.board_revision));
     writeSerial("");
-    
     // Power Option
     writeSerial("--- Power Configuration ---");
     writeSerial("Power Mode: " + String(globalConfig.power_option.power_mode));
@@ -1706,7 +1789,6 @@ void printConfigSummary() {
     writeSerial("Voltage Scaling Factor: " + String(globalConfig.power_option.voltage_scaling_factor));
     writeSerial("Deep Sleep Current: " + String(globalConfig.power_option.deep_sleep_current_ua) + " uA");
     writeSerial("");
-    
     // Displays
     writeSerial("--- Display Configurations (" + String(globalConfig.display_count) + ") ---");
     for (int i = 0; i < globalConfig.display_count; i++) {
@@ -1727,20 +1809,7 @@ void printConfigSummary() {
         writeSerial("  Color Scheme: 0x" + String(globalConfig.displays[i].color_scheme, HEX));
         writeSerial("  Transmission Modes: 0x" + String(globalConfig.displays[i].transmission_modes, HEX));
         writeSerial("");
-        
-        display_count++;
-        epd = BBEPAPER(globalConfig.displays[i].panel_ic_type);
-        CS_PIN = globalConfig.displays[i].cs_pin;
-        DC_PIN = globalConfig.displays[i].dc_pin;
-        RESET_PIN = globalConfig.displays[i].reset_pin;
-        BUSY_PIN = globalConfig.displays[i].busy_pin;
-        CLK_PIN = globalConfig.displays[i].reserved_pin_1;
-        MOSI_PIN = globalConfig.displays[i].data_pin;
-
-        Color_Scheme = globalConfig.displays[i].color_scheme;
-        Rotation_Map = globalConfig.displays[i].rotation;
     }
-    
     // LEDs
     writeSerial("--- LED Configurations (" + String(globalConfig.led_count) + ") ---");
     for (int i = 0; i < globalConfig.led_count; i++) {
@@ -1753,13 +1822,7 @@ void printConfigSummary() {
                    " 4=" + String(globalConfig.leds[i].led_4));
         writeSerial("  Flags: 0x" + String(globalConfig.leds[i].led_flags, HEX));
         writeSerial("");
-
-        led_count++;
-        Led_RED = globalConfig.leds[i].led_1_r;
-        Led_Green = globalConfig.leds[i].led_2_g;
-        Led_Blue = globalConfig.leds[i].led_3_b;
     }
-    
     // Sensors
     writeSerial("--- Sensor Configurations (" + String(globalConfig.sensor_count) + ") ---");
     for (int i = 0; i < globalConfig.sensor_count; i++) {
@@ -1769,7 +1832,6 @@ void printConfigSummary() {
         writeSerial("  Bus ID: " + String(globalConfig.sensors[i].bus_id));
         writeSerial("");
     }
-    
     // Data Buses
     writeSerial("--- Data Bus Configurations (" + String(globalConfig.data_bus_count) + ") ---");
     for (int i = 0; i < globalConfig.data_bus_count; i++) {
@@ -1789,7 +1851,6 @@ void printConfigSummary() {
         writeSerial("  Pulldowns: 0x" + String(globalConfig.data_buses[i].pulldowns, HEX));
         writeSerial("");
     }
-    
     // Binary Inputs
     writeSerial("--- Binary Input Configurations (" + String(globalConfig.binary_input_count) + ") ---");
     for (int i = 0; i < globalConfig.binary_input_count; i++) {
@@ -1811,6 +1872,5 @@ void printConfigSummary() {
         writeSerial("  Pulldowns: 0x" + String(globalConfig.binary_inputs[i].pulldowns, HEX));
         writeSerial("");
     }
-    
     writeSerial("=============================");
 }
