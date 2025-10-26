@@ -1,70 +1,78 @@
 #include <Arduino.h>
 #include "structs.h"
-#include <bluefruit.h>
 #include "uzlib.h"
 #include <bb_epaper.h>
+
+#ifdef TARGET_NRF
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
+using namespace Adafruit_LittleFS_Namespace;
+#endif
+
+#ifdef TARGET_ESP32
+#include <LittleFS.h>
+#endif
 
 #define DECOMP_CHUNK 512
-#define MAX_DECOMPRESSED_SIZE (512 * 1024)  // 512KB max decompressed size
-#define DECOMP_CHUNK_SIZE 4096              // 4KB chunks for processing
-#define MAX_DICT_SIZE 32768                 // Maximum dictionary size
-#define MAX_IMAGE_SIZE (50 * 1024)          // 50KB max image data buffer
-#define MAX_BLOCKS 16                       // Support up to 50KB images in 4KB blocks
-#define CONFIG_FILE_PATH "/config.bin"      // Config file path in LittleFS
-#define MAX_CONFIG_SIZE 4096                // 4KB max config size
+#define MAX_DECOMPRESSED_SIZE (512 * 1024)
+#define DECOMP_CHUNK_SIZE 4096
+#define MAX_DICT_SIZE 32768
+#define MAX_IMAGE_SIZE (50 * 1024)
+#define MAX_BLOCKS 16
+#define CONFIG_FILE_PATH "/config.bin"
+#define MAX_CONFIG_SIZE 4096
 
-BBEPAPER epd(EP426_800x480);
+// Platform-specific constants
+#ifdef TARGET_NRF
+#define ADC_RESOLUTION 12  // nRF52840 has 12-bit ADC
+#ifndef PIN_VBAT
+#define PIN_VBAT PIN_A6  // Virtual pin for battery
+#endif
+#ifndef VBAT_ENABLE
+#define VBAT_ENABLE 27  // nRF pin for VBAT enable
+#endif
+#endif
 
-uint8_t led_count = 0;
-uint32_t Led_RED = 26;
-uint32_t Led_Green = 30;
-uint32_t Led_Blue = 06;
+#ifdef TARGET_ESP32
+#define ADC_RESOLUTION 12  // ESP32-S3 has 12-bit ADC
+// ESP32-specific pin definitions can be added here if needed
+#endif
 
-uint8_t display_count = 0;
-uint32_t CS_PIN = 44;
-uint32_t DC_PIN = 31;
-uint32_t RESET_PIN = 15;
-uint32_t BUSY_PIN = 29;
-uint32_t CLK_PIN = 45;
-uint32_t MOSI_PIN = 47;
-uint32_t PowerPin = 43;
+#ifdef TARGET_NRF
+#include <bluefruit.h>
+extern BLEDfu bledfu;
+extern BLEService imageService;
+extern BLECharacteristic imageCharacteristic;
+#endif
 
-uint32_t Color_Scheme = 0;
-uint32_t Rotation_Map = 0;
+#ifdef TARGET_ESP32
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLEAdvertising.h>
+#include <esp_system.h>
 
-BLEDfu bledfu;
+extern BLEServer* pServer;
+extern BLEService* pService;
+extern BLECharacteristic* pTxCharacteristic;
+extern BLECharacteristic* pRxCharacteristic;
+#endif
 
-BLEService imageService("1337");
-BLECharacteristic imageCharacteristic("1337", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
+BBEPAPER epd;
 
 ImageData currentImage = {0};
 uint8_t currentBlockId = 0;
 uint8_t currentPacketId = 0;
 uint8_t expectedPackets = 0;
 uint8_t receivedPackets = 0;
-
-uint8_t imageDataBuffer[MAX_IMAGE_SIZE];           // 50KB image data buffer
-bool blocksReceived[MAX_BLOCKS];                   // Block tracking arrays
+uint8_t imageDataBuffer[MAX_IMAGE_SIZE];
+bool blocksReceived[MAX_BLOCKS];
 uint32_t blockBytesReceived[MAX_BLOCKS];
 uint32_t blockPacketsReceived[MAX_BLOCKS];
-uint8_t decompressionChunk[DECOMP_CHUNK_SIZE];     // 4KB decompression chunk
-uint8_t dictionaryBuffer[MAX_DICT_SIZE];           // 32KB dictionary
-uint8_t headerBuffer[6];                           // 6-byte image header
-uint8_t bleResponseBuffer[94];                     // BLE response buffer
-
-// Config storage structure
-typedef struct {
-    uint32_t magic;        // 0xDEADBEEF for validation
-    uint32_t version;      // Config version
-    uint32_t crc;          // CRC32 of config data
-    uint32_t data_len;     // Actual data length
-    uint8_t data[MAX_CONFIG_SIZE]; // Config data
-} config_storage_t;
-
-// LittleFS namespace
-using namespace Adafruit_LittleFS_Namespace;
+uint8_t decompressionChunk[DECOMP_CHUNK_SIZE];
+uint8_t dictionaryBuffer[MAX_DICT_SIZE];
+uint8_t headerBuffer[6];
+uint8_t bleResponseBuffer[94];
 
 void pwrmgm(bool onoff);
 void writeSerial(String message, bool newLine = true);
@@ -74,7 +82,11 @@ void initDisplay();
 void hibernateDisplay();
 void writeDisplayData();
 String getChipIdHex();
+#ifdef TARGET_NRF
 void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len);
+#else
+void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len);
+#endif
 void handleImageInfo(uint8_t* data, uint16_t len);
 void handleBlockData(uint8_t* data, uint16_t len);
 void handleReadDynamicConfig();
@@ -84,15 +96,15 @@ void sendResponse(uint8_t* response, uint8_t len);
 uint32_t calculateCRC32(uint8_t* data, uint32_t len);
 void displayReceivedImage();
 void drawImageData();
-bool decompressImageData(uint8_t** output, uint32_t* outputSize);
 void drawLogo(int x, int y);
 void busyCallback(const void*);
 void initio();
 void updatemsdata();
 void cleanupImageMemory();
 bool decompressImageDataChunked();
-
-// Config storage functions
+void ble_init();
+void full_config_init();
+void formatConfigStorage();
 bool initConfigStorage();
 bool saveConfig(uint8_t* configData, uint32_t len);
 bool loadConfig(uint8_t* configData, uint32_t* len);
@@ -101,30 +113,8 @@ void handleReadConfig();
 void handleWriteConfig(uint8_t* data, uint16_t len);
 void handleWriteConfigChunk(uint8_t* data, uint16_t len);
 void printConfigSummary();
-
-// Chunked config write state
-typedef struct {
-    bool active;
-    uint32_t totalSize;
-    uint32_t receivedSize;
-    uint8_t buffer[MAX_CONFIG_SIZE];
-    uint32_t expectedChunks;
-    uint32_t receivedChunks;
-} chunked_write_state_t;
-
-extern chunked_write_state_t chunkedWriteState;
-
-chunked_write_state_t chunkedWriteState = {false, 0, 0, {0}, 0, 0};
-struct GlobalConfig globalConfig = {0};
-uint8_t configReadResponseBuffer[128];
-
-// Global configuration instance
-extern struct GlobalConfig globalConfig;
-
-// Config loading function
+void reboot();
 bool loadGlobalConfig();
-
-// Config access helper functions
 bool isConfigLoaded();
 struct SystemConfig* getSystemConfig();
 struct ManufacturerData* getManufacturerData();
@@ -140,3 +130,27 @@ uint8_t getDataBusCount();
 struct BinaryInputs* getBinaryInput(uint8_t index);
 uint8_t getBinaryInputCount();
 void printConfigSummary();
+
+typedef struct {
+    bool active;
+    uint32_t totalSize;
+    uint32_t receivedSize;
+    uint8_t buffer[MAX_CONFIG_SIZE];
+    uint32_t expectedChunks;
+    uint32_t receivedChunks;
+} chunked_write_state_t;
+
+typedef struct {
+    uint32_t magic;        
+    uint32_t version;
+    uint32_t crc;
+    uint32_t data_len;
+    uint8_t data[MAX_CONFIG_SIZE];
+} config_storage_t;
+
+extern chunked_write_state_t chunkedWriteState;
+chunked_write_state_t chunkedWriteState = {false, 0, 0, {0}, 0, 0};
+struct GlobalConfig globalConfig = {0};
+uint8_t configReadResponseBuffer[128];
+
+extern struct GlobalConfig globalConfig;
