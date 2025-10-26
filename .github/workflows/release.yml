@@ -22,6 +22,12 @@ jobs:
           curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o uf2families.json
           chmod +x uf2conv.py
 
+      - name: Install intelhex
+        run: pip install --upgrade intelhex
+
+      - name: Install esptool
+        run: pip install esptool
+
       - name: Build Firmware
         run: |
           pio run
@@ -41,6 +47,20 @@ jobs:
             --family 0xADA52840 \
             --output firmware_output/production-${TAG_NAME}.uf2
 
+      - name: Build esp32-s3-N16R8 Firmware
+        run: |
+          pio run --environment oeplesp32-s3-N16R8
+          mkdir oeplesp32-s3-N16R8
+          cp ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin oeplesp32-s3-N16R8/boot_app0.bin
+          cp .pio/build/oeplesp32-s3-N16R8/firmware.bin oeplesp32-s3-N16R8/firmware.bin
+          cp .pio/build/oeplesp32-s3-N16R8/bootloader.bin oeplesp32-s3-N16R8/bootloader.bin
+          cp .pio/build/oeplesp32-s3-N16R8/partitions.bin oeplesp32-s3-N16R8/partitions.bin
+          cd oeplesp32-s3-N16R8
+          esptool.py --chip esp32-s3 merge_bin -o merged-firmware.bin --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
+          cd ~/
+          cp oeplesp32-s3-N16R8/firmware.bin firmware_output/oeplesp32-s3-N16R8.bin
+          cp oeplesp32-s3-N16R8/merged-firmware.bin firmware_output/oeplesp32-s3-N16R8_full.bin
+          
       - name: Upload Release Assets
         uses: svenstaro/upload-release-action@v2
         with:
