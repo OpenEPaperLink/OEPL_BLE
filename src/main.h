@@ -74,6 +74,7 @@ uint8_t dictionaryBuffer[MAX_DICT_SIZE];
 uint8_t headerBuffer[6];
 uint8_t bleResponseBuffer[94];
 
+bool waitforrefresh(int timeout);
 void pwrmgm(bool onoff);
 void writeSerial(String message, bool newLine = true);
 void connect_callback(uint16_t conn_handle);

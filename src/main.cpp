@@ -384,15 +384,10 @@ void initDisplay(){
     writeSerial("Writing plane...");
     epd.writePlane();
     writeSerial("Refreshing display...");
-    #ifdef TARGET_ESP32
-    //no propper sleep implemented yet for ESP32
+
     epd.refresh(REFRESH_FULL, false);
-    delay(10000);
-    #endif
-    #ifdef TARGET_NRF
-    epd.refresh(REFRESH_FULL, true);
-    delay(2000);
-    #endif
+    waitforrefresh(60);
+
     uint16_t newrotation = globalConfig.displays[0].rotation * 90 + 270;
     if(newrotation >= 360)newrotation = newrotation - 360;
     epd.setRotation(newrotation);    
@@ -401,6 +396,23 @@ void initDisplay(){
     else{
         writeSerial("No display found");
     }
+}
+
+bool waitforrefresh(int timeout){
+    for (size_t i = 0; i < timeout * 10; i++){
+        delay(100);
+        if(i % 5 == 0)writeSerial(".",false);
+        if(!epd.isBusy()){
+        writeSerial(".");
+        writeSerial("Refresh took ",false);
+        writeSerial((String)((float)i / 10),false);
+        writeSerial(" seconds");
+        delay(200);
+        return true;
+        }
+    }
+    writeSerial("Refresh timed out");
+    return false;
 }
 
 void connect_callback(uint16_t conn_handle) {
@@ -774,14 +786,8 @@ void displayReceivedImage() {
     epd.initIO(globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin);
     drawImageData();
     epd.writePlane();
-    #ifdef TARGET_ESP32
     epd.refresh(REFRESH_FULL, false);
-    delay(10000);
-    #endif
-    #ifdef TARGET_NRF
-    epd.refresh(REFRESH_FULL, true);
-    delay(2000);
-    #endif
+    waitforrefresh(60);
     epd.sleep(DEEP_SLEEP);
     pwrmgm(false);
     writeSerial("=== IMAGE DISPLAY COMPLETE ===");
