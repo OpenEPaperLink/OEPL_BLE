@@ -17,49 +17,36 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install platformio
+          pip install esptool
+          pip install --upgrade intelhex
           pip install adafruit-nrfutil
           curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o uf2conv.py
           curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o uf2families.json
           chmod +x uf2conv.py
 
-      - name: Install intelhex
-        run: pip install --upgrade intelhex
-
-      - name: Install esptool
-        run: pip install esptool
-
-      - name: Build Firmware
+      - name: Build & Package NRF Firmware
         run: |
           pio run --environment oeplnrf 
-
-      - name: Copy Production Firmware
-        run: |
           mkdir firmware_output
-          cp .pio/build/oeplnrf/firmware.hex firmware_output/production.hex
-
-      - name: Rename & Package
-        run: |
+          cp .pio/build/oeplnrf/firmware.hex firmware_output/NRF52840.hex
           TAG_NAME=${{ github.event.release.tag_name }}
-          adafruit-nrfutil dfu genpkg --dev-type 0x0052 --application firmware_output/production.hex firmware_output/dfu.zip
-          mv firmware_output/production.hex firmware_output/production-${TAG_NAME}.hex
-          mv firmware_output/dfu.zip firmware_output/dfu-${TAG_NAME}.zip
-          python uf2conv.py firmware_output/production-${TAG_NAME}.hex \
-            --family 0xADA52840 \
-            --output firmware_output/production-${TAG_NAME}.uf2
+          adafruit-nrfutil dfu genpkg --dev-type 0x0052 --application firmware_output/NRF52840.hex firmware_output/NRF52840.zip
+          python uf2conv.py firmware_output/NRF52840.hex --family 0xADA52840 --output firmware_output/NRF52840.uf2
 
-      - name: Build esp32-s3-N16R8 Firmware
+      - name: Build & Package esp32-s3-N16R8 Firmware
         run: |
-          pio run --environment oeplesp32-s3-N16R8
-          mkdir oeplesp32-s3-N16R8
-          cp ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin oeplesp32-s3-N16R8/boot_app0.bin
-          cp .pio/build/oeplesp32-s3-N16R8/firmware.bin oeplesp32-s3-N16R8/firmware.bin
-          cp .pio/build/oeplesp32-s3-N16R8/bootloader.bin oeplesp32-s3-N16R8/bootloader.bin
-          cp .pio/build/oeplesp32-s3-N16R8/partitions.bin oeplesp32-s3-N16R8/partitions.bin
-          cd oeplesp32-s3-N16R8
+          pioenv=oeplesp32-s3-N16R8
+          pio run --environment ${pioenv}
+          mkdir ${pioenv}
+          cp ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin ${pioenv}/boot_app0.bin
+          cp .pio/build/${pioenv}/firmware.bin ${pioenv}/firmware.bin
+          cp .pio/build/${pioenv}/bootloader.bin ${pioenv}/bootloader.bin
+          cp .pio/build/${pioenv}/partitions.bin ${pioenv}/partitions.bin
+          cd ${pioenv}
           esptool.py --chip esp32-s3 merge_bin -o merged-firmware.bin --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
           cd ..
-          cp oeplesp32-s3-N16R8/firmware.bin firmware_output/oeplesp32-s3-N16R8.bin
-          cp oeplesp32-s3-N16R8/merged-firmware.bin firmware_output/oeplesp32-s3-N16R8_full.bin
+          cp ${pioenv}/firmware.bin firmware_output/${pioenv}.bin
+          cp ${pioenv}/merged-firmware.bin firmware_output/${pioenv}_full.bin
           
       - name: Upload Release Assets
         uses: svenstaro/upload-release-action@v2
