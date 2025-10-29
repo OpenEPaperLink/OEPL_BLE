@@ -2,12 +2,37 @@
 
 #ifdef TARGET_NRF
 BLEDfu bledfu;
-BLEService imageService("1337");
-BLECharacteristic imageCharacteristic("1337", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
+BLEService imageService("2446");
+BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
 #endif
 
 #ifdef TARGET_ESP32
-// BLE Server Callbacks
+// Define queue sizes and structures first
+#define RESPONSE_QUEUE_SIZE 10
+#define MAX_RESPONSE_SIZE 512
+#define COMMAND_QUEUE_SIZE 5
+#define MAX_COMMAND_SIZE 512
+
+struct ResponseQueueItem {
+    uint8_t data[MAX_RESPONSE_SIZE];
+    uint16_t len;
+    bool pending;
+};
+
+struct CommandQueueItem {
+    uint8_t data[MAX_COMMAND_SIZE];
+    uint16_t len;
+    bool pending;
+};
+
+ResponseQueueItem responseQueue[RESPONSE_QUEUE_SIZE];
+uint8_t responseQueueHead = 0;
+uint8_t responseQueueTail = 0;
+
+CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
+uint8_t commandQueueHead = 0;
+uint8_t commandQueueTail = 0;
+
 class MyBLEServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
         writeSerial("=== BLE CLIENT CONNECTED (ESP32) ===");
@@ -15,22 +40,12 @@ class MyBLEServerCallbacks : public BLEServerCallbacks {
         delay(100);  // Give connection time to fully establish
         writeSerial("Number of connected clients: " + String(pServer->getConnectedCount()));
     }
-
     void onDisconnect(BLEServer* pServer) {
         writeSerial("=== BLE CLIENT DISCONNECTED (ESP32) ===");
         writeSerial("Client disconnected from ESP32 BLE server");
         writeSerial("Number of remaining clients: " + String(pServer->getConnectedCount()));
-        
-        if (currentImage.data || currentImage.blocksReceived || 
-            currentImage.blockBytesReceived || currentImage.blockPacketsReceived) {
-            writeSerial("Cleaning up image data due to disconnect...");
-            cleanupImageMemory();
-        }
-        
-        // Restart advertising to allow new connections
         writeSerial("Waiting before restarting advertising...");
         delay(500);
-        
         if (pServer->getConnectedCount() == 0) {
             BLEDevice::startAdvertising();
             writeSerial("Advertising restarted");
@@ -40,14 +55,13 @@ class MyBLEServerCallbacks : public BLEServerCallbacks {
     }
 };
 
-// BLE Characteristic Callbacks
 class MyBLECharacteristicCallbacks : public BLECharacteristicCallbacks {
 public:
     void onWrite(BLECharacteristic* pCharacteristic) {
         writeSerial("=== BLE WRITE RECEIVED (ESP32) ===");
         String value = pCharacteristic->getValue();
         writeSerial("Received data length: " + String(value.length()) + " bytes");
-        if (value.length() > 0) {
+        if (value.length() > 0 && value.length() <= MAX_COMMAND_SIZE) {
             uint8_t* data = (uint8_t*)value.c_str();
             uint16_t len = value.length();
             // Log first few bytes
@@ -57,15 +71,26 @@ public:
                 hexDump += String(data[i], HEX) + " ";
             }
             writeSerial(hexDump);
-            imageDataWritten(NULL, NULL, data, len);
+            
+            // Queue command for processing in main loop to avoid blocking callback
+            uint8_t nextHead = (commandQueueHead + 1) % COMMAND_QUEUE_SIZE;
+            if (nextHead != commandQueueTail) {
+                memcpy(commandQueue[commandQueueHead].data, data, len);
+                commandQueue[commandQueueHead].len = len;
+                commandQueue[commandQueueHead].pending = true;
+                commandQueueHead = nextHead;
+                writeSerial("ESP32: Command queued for processing");
+            } else {
+                writeSerial("ERROR: Command queue full, dropping command");
+            }
+        } else if (value.length() > MAX_COMMAND_SIZE) {
+            writeSerial("WARNING: Command too large, dropping");
         } else {
             writeSerial("WARNING: Empty data received");
         }
     }
 };
-#endif
 
-#ifdef TARGET_ESP32
 BLEServer* pServer = nullptr;
 BLEService* pService = nullptr;
 BLECharacteristic* pTxCharacteristic = nullptr;
@@ -91,6 +116,28 @@ void setup() {
 }
 
 void loop() {
+    #ifdef TARGET_ESP32
+    // Process queued commands outside of callback context
+    if (commandQueueTail != commandQueueHead) {
+        writeSerial("ESP32: Processing queued command (" + String(commandQueue[commandQueueTail].len) + " bytes)");
+        imageDataWritten(NULL, NULL, commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
+        commandQueue[commandQueueTail].pending = false;
+        commandQueueTail = (commandQueueTail + 1) % COMMAND_QUEUE_SIZE;
+        writeSerial("Command processed");
+    }
+    
+    // Process queued BLE responses outside of callback context (one per loop for better responsiveness)
+    if (responseQueueTail != responseQueueHead && pTxCharacteristic && pServer && pServer->getConnectedCount() > 0) {
+        writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
+        pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
+        pTxCharacteristic->notify();
+        responseQueue[responseQueueTail].pending = false;
+        responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
+        writeSerial("Response sent successfully");
+        delay(20); // Brief delay to let BLE stack process
+    }
+    #endif
+    
     if (currentImage.ready) {
         writeSerial("Processing received image...");
         displayReceivedImage();
@@ -98,8 +145,28 @@ void loop() {
         cleanupImageMemory();
         writeSerial("Image processing complete");
     }
-    if(globalConfig.power_option.sleep_timeout_ms > 0)delay(globalConfig.power_option.sleep_timeout_ms);
-    else delay(2000);    
+    
+    #ifdef TARGET_ESP32
+    // Use shorter delay when BLE transfers are active for faster response
+    bool bleActive = (commandQueueTail != commandQueueHead) || 
+                     (responseQueueTail != responseQueueHead) ||
+                     (pServer && pServer->getConnectedCount() > 0);
+    
+    if (bleActive) {
+        delay(10); // Fast polling when BLE is active
+    } else {
+        if(globalConfig.power_option.sleep_timeout_ms > 0)
+            delay(globalConfig.power_option.sleep_timeout_ms);
+        else 
+            delay(2000);
+    }
+    #else
+    if(globalConfig.power_option.sleep_timeout_ms > 0)
+        delay(globalConfig.power_option.sleep_timeout_ms);
+    else 
+        delay(2000);
+    #endif
+    
     writeSerial("Loop end: " + String(millis() / 100));
 }
 
@@ -144,7 +211,7 @@ void updatemsdata(){
 //THIS IS A PLACEHOLDER FOR THE ACTUAL PAYLOAD
 //carefull, the size is limited
 uint8_t msd_payload[13];
-uint16_t msd_cid = 0x1337;
+uint16_t msd_cid = 0x2446;
 memset(msd_payload, 0, sizeof(msd_payload));
 memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
 msd_payload[2] = 0x02;
@@ -192,7 +259,7 @@ void ble_init(){
     bledfu.begin();
     writeSerial("BLE DFU initialized successfully");
     writeSerial("BLE initialized successfully");
-    writeSerial("Setting up BLE service 0x1337...");
+    writeSerial("Setting up BLE service 0x2446...");
     imageService.begin();
     writeSerial("BLE service started");
     imageCharacteristic.setWriteCallback(imageDataWritten);
@@ -235,14 +302,14 @@ void ble_init(){
     MyBLEServerCallbacks* serverCallbacks = new MyBLEServerCallbacks();
     pServer->setCallbacks(serverCallbacks);
     writeSerial("Server callbacks configured");
-    BLEUUID serviceUUID("00001337-0000-1000-8000-00805F9B34FB");
+    BLEUUID serviceUUID("00002446-0000-1000-8000-00805F9B34FB");
     pService = pServer->createService(serviceUUID);
     if (pService == nullptr) {
         writeSerial("ERROR: Failed to create BLE service");
         return;
     }
-    writeSerial("BLE service 0x1337 created successfully");
-    BLEUUID charUUID("00001337-0000-1000-8000-00805F9B34FB");
+    writeSerial("BLE service 0x2446 created successfully");
+    BLEUUID charUUID("00002446-0000-1000-8000-00805F9B34FB");
     pTxCharacteristic = pService->createCharacteristic(
         charUUID,
         BLECharacteristic::PROPERTY_READ |
@@ -266,10 +333,12 @@ void ble_init(){
     }
     pAdvertising->addServiceUUID(serviceUUID);
     writeSerial("Service UUID added to advertising");
-    // Add manufacturer data
     BLEAdvertisementData advertisementData;
+    advertisementData.setName(deviceName);
+    writeSerial("Device name added to advertising");
+    // Add manufacturer data
     uint8_t msd_payload[13];
-    uint16_t msd_cid = 0x1337;
+    uint16_t msd_cid = 0x2446;
     memset(msd_payload, 0, sizeof(msd_payload));
     memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
     msd_payload[2] = 0x02;
@@ -290,7 +359,7 @@ void ble_init(){
     advertisementData.setManufacturerData(manufacturerDataStr);
     pAdvertising->setAdvertisementData(advertisementData);
     writeSerial("Manufacturer data added to advertising");
-    pAdvertising->setScanResponse(true);
+    pAdvertising->setScanResponse(false);
     pAdvertising->setMinPreferred(0x0006);
     pAdvertising->setMinPreferred(0x0012);
     writeSerial("Advertising intervals set");
@@ -424,11 +493,6 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
     (void)reason;
     writeSerial("=== BLE CLIENT DISCONNECTED ===");
     writeSerial("Disconnect reason: " + String(reason));
-    if (currentImage.data || currentImage.blocksReceived || 
-        currentImage.blockBytesReceived || currentImage.blockPacketsReceived) {
-        writeSerial("Cleaning up image data due to disconnect...");
-        cleanupImageMemory();
-    }
 }
 
 String getChipIdHex() {
@@ -738,18 +802,26 @@ void sendResponse(uint8_t* response, uint8_t len){
     writeSerial("Response notified (nRF52)");
     #endif
     #ifdef TARGET_ESP32
-    if (pTxCharacteristic) {
-        writeSerial("ESP32: Setting characteristic value...");
-        pTxCharacteristic->setValue(response, len);
-        // Need to explicitly notify for ESP32
-        pTxCharacteristic->notify(true);
-        writeSerial("SetValue and notify called successfully");
+    // Queue response to avoid calling notify() from callback context
+    if (len <= MAX_RESPONSE_SIZE) {
+        uint8_t nextHead = (responseQueueHead + 1) % RESPONSE_QUEUE_SIZE;
+        if (nextHead != responseQueueTail) {
+            memcpy(responseQueue[responseQueueHead].data, response, len);
+            responseQueue[responseQueueHead].len = len;
+            responseQueue[responseQueueHead].pending = true;
+            responseQueueHead = nextHead;
+            writeSerial("ESP32: Response queued (queue size: " + String((responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE) % RESPONSE_QUEUE_SIZE) + ")");
+        } else {
+            writeSerial("ERROR: Response queue full, dropping response");
+        }
     } else {
-        writeSerial("ERROR: pTxCharacteristic is null");
+        writeSerial("ERROR: Response too large for queue (" + String(len) + " > " + String(MAX_RESPONSE_SIZE) + ")");
     }
     #endif
+    #ifndef TARGET_ESP32
     delay(20);
     writeSerial("Response sent successfully");
+    #endif
 }
 
 uint32_t calculateCRC32(uint8_t* data, uint32_t len) {
