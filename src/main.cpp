@@ -412,11 +412,82 @@ void writeSerial(String message, bool newLine){
     else Serial.print(message);
 }
 
+int mapEpd(int id){
+    // Map config.yaml panel_ic_type enum values to bb_epaper.h EP_PANEL_* enum values
+    switch(id) {
+        case 0x0000: return EP_PANEL_UNDEFINED; // ep_panel_undefined
+        case 0x0001: return EP42_400x300; // ep42_400x300
+        case 0x0002: return EP42B_400x300; // ep42b_400x300
+        case 0x0003: return EP213_122x250; // ep213_122x250
+        case 0x0004: return EP213B_122x250; // ep213b_122x250
+        case 0x0005: return EP293_128x296; // ep293_128x296
+        case 0x0006: return EP294_128x296; // ep294_128x296
+        case 0x0007: return EP295_128x296; // ep295_128x296
+        case 0x0008: return EP295_128x296_4GRAY; // ep295_128x296_4gray
+        case 0x0009: return EP266_152x296; // ep266_152x296
+        case 0x000A: return EP102_80x128; // ep102_80x128
+        case 0x000B: return EP27B_176x264; // ep27b_176x264
+        case 0x000C: return EP29R_128x296; // ep29r_128x296
+        case 0x000D: return EP122_192x176; // ep122_192x176
+        case 0x000E: return EP154R_152x152; // ep154r_152x152
+        case 0x000F: return EP42R_400x300; // ep42r_400x300
+        case 0x0010: return EP42R2_400x300; // ep42r2_400x300
+        case 0x0011: return EP37_240x416; // ep37_240x416
+        case 0x0012: return EP37B_240x416; // ep37b_240x416
+        case 0x0013: return EP213_104x212; // ep213_104x212
+        case 0x0014: return EP75_800x480; // ep75_800x480 (older version)
+        case 0x0015: return EP75_800x480_4GRAY; // ep75_800x480_4gray (older version)
+        case 0x0016: return EP75_800x480_4GRAY_V2; // ep75_800x480_4gray_v2 (renamed from ep75_800x480_4gray_old)
+        case 0x0017: return EP29_128x296; // ep29_128x296
+        case 0x0018: return EP29_128x296_4GRAY; // ep29_128x296_4gray
+        case 0x0019: return EP213R_122x250; // ep213r_122x250
+        case 0x001A: return EP154_200x200; // ep154_200x200
+        case 0x001B: return EP154B_200x200; // ep154b_200x200
+        case 0x001C: return EP266YR_184x360; // ep266yr_184x360
+        case 0x001D: return EP29YR_128x296; // ep29yr_128x296
+        case 0x001E: return EP29YR_168x384; // ep29yr_168x384
+        case 0x001F: return EP583_648x480; // ep583_648x480
+        case 0x0020: return EP296_128x296; // ep296_128x296
+        case 0x0021: return EP26R_152x296; // ep26r_152x296
+        case 0x0022: return EP73_800x480; // ep73_800x480
+        case 0x0023: return EP73_SPECTRA_800x480; // ep73_spectra_800x480
+        case 0x0024: return EP74R_640x384; // ep74r_640x384
+        case 0x0025: return EP583R_600x448; // ep583r_600x448
+        case 0x0026: return EP75R_800x480; // ep75r_800x480
+        case 0x0027: return EP426_800x480; // ep426_800x480
+        case 0x0028: return EP426_800x480_4GRAY; // ep426_800x480_4gray
+        case 0x0029: return EP29R2_128x296; // ep29r2_128x296
+        case 0x002A: return EP41_640x400; // ep41_640x400
+        case 0x002B: return EP81_SPECTRA_1024x576; // ep81_spectra_1024x576
+        case 0x002C: return EP7_960x640; // ep7_960x640
+        case 0x002D: return EP213R2_122x250; // ep213r2_122x250
+        case 0x002E: return EP29Z_128x296; // ep29z_128x296
+        case 0x002F: return EP29Z_128x296_4GRAY; // ep29z_128x296_4gray
+        case 0x0030: return EP213Z_122x250; // ep213z_122x250
+        case 0x0031: return EP213Z_122x250_4GRAY; // ep213z_122x250_4gray
+        case 0x0032: return EP154Z_152x152; // ep154z_152x152
+        case 0x0033: return EP579_792x272; // ep579_792x272
+        case 0x0034: return EP213YR_122x250; // ep213yr_122x250
+        case 0x0035: return EP37YR_240x416; // ep37yr_240x416
+        case 0x0036: return EP35YR_184x384; // ep35yr_184x384
+        case 0x0037: return EP397YR_800x480; // ep397yr_800x480
+        case 0x0038: return EP154YR_200x200; // ep154yr_200x200
+        case 0x0039: return EP266YR2_184x360; // ep266yr2_184x360
+        case 0x003A: return EP42YR_400x300; // ep42yr_400x300
+        case 0x003B: return EP75_800x480_GEN2; // ep75_800x480_gen2
+        case 0x003C: return EP75_800x480_4GRAY_GEN2; // ep75_800x480_4gray_gen2
+        case 0x003D: return EP215YR_160x296; // ep215yr_160x296
+        case 0x003E: return EP1085_1360x480; // ep1085_1360x480
+        case 0x003F: return EP31_240x320; // ep31_240x320
+        default: return EP_PANEL_UNDEFINED; // Unknown panel type
+    }
+}
+
 void initDisplay(){
     writeSerial("=== Initializing Display ===");
     if(globalConfig.display_count > 0){
     pwrmgm(true);
-    epd = BBEPAPER(globalConfig.displays[0].panel_ic_type);
+    epd = BBEPAPER(mapEpd(globalConfig.displays[0].panel_ic_type));
     epd.setRotation(globalConfig.displays[0].rotation * 90);
     epd.initIO(globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin);
     writeSerial(String("Height: ") + String(epd.height()));

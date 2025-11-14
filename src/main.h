@@ -131,6 +131,7 @@ uint8_t getDataBusCount();
 struct BinaryInputs* getBinaryInput(uint8_t index);
 uint8_t getBinaryInputCount();
 void printConfigSummary();
+int mapEpd(int id);
 
 typedef struct {
     bool active;
