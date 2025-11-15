@@ -205,6 +205,405 @@ void initio(){
     else{
         writeSerial("Power pin not set");
     }
+    initDataBuses();
+    initSensors();
+}
+
+void initDataBuses(){
+    writeSerial("=== Initializing Data Buses ===");
+    if(globalConfig.data_bus_count == 0){
+        writeSerial("No data buses configured");
+        return;
+    }
+    for(uint8_t i = 0; i < globalConfig.data_bus_count; i++){
+        struct DataBus* bus = &globalConfig.data_buses[i];
+        if(bus->bus_type == 0x01){ // I2C bus
+            writeSerial("Initializing I2C bus " + String(i) + " (instance " + String(bus->instance_number) + ")");
+            if(bus->pin_1 == 0xFF || bus->pin_2 == 0xFF){
+                writeSerial("ERROR: Invalid I2C pins for bus " + String(i) + " (SCL=" + String(bus->pin_1) + ", SDA=" + String(bus->pin_2) + ")");
+                continue;
+            }
+            uint32_t busSpeed = (bus->bus_speed_hz > 0) ? bus->bus_speed_hz : 100000;
+            #ifdef TARGET_ESP32
+            pinMode(bus->pin_1, INPUT);
+            pinMode(bus->pin_2, INPUT);
+            if(bus->pullups & 0x01){
+                pinMode(bus->pin_1, INPUT_PULLUP);
+            }
+            if(bus->pullups & 0x02){
+                pinMode(bus->pin_2, INPUT_PULLUP);
+            }
+            if(bus->pulldowns & 0x01){
+                pinMode(bus->pin_1, INPUT_PULLDOWN);
+            }
+            if(bus->pulldowns & 0x02){
+                pinMode(bus->pin_2, INPUT_PULLDOWN);
+            }
+            #endif
+            #ifdef TARGET_NRF
+            pinMode(bus->pin_1, INPUT);
+            pinMode(bus->pin_2, INPUT);
+            if(bus->pullups & 0x01){
+                pinMode(bus->pin_1, INPUT_PULLUP);
+            }
+            if(bus->pullups & 0x02){
+                pinMode(bus->pin_2, INPUT_PULLUP);
+            }
+            #endif
+            if(i == 0){
+                #ifdef TARGET_ESP32
+                Wire.begin(bus->pin_2, bus->pin_1); // SDA, SCL
+                Wire.setClock(busSpeed);
+                #endif
+                #ifdef TARGET_NRF
+                Wire.begin(); // Uses default I2C pins
+                Wire.setClock(busSpeed);
+                writeSerial("NOTE: nRF52840 using default I2C pins (config pins: SCL=" + String(bus->pin_1) + ", SDA=" + String(bus->pin_2) + ")");
+                #endif
+                writeSerial("I2C bus " + String(i) + " initialized: SCL=pin" + String(bus->pin_1) + ", SDA=pin" + String(bus->pin_2) + ", Speed=" + String(busSpeed) + "Hz");
+                scanI2CDevices();
+            } else {
+                writeSerial("WARNING: I2C bus " + String(i) + " configured but not initialized (only first bus supported)");
+                writeSerial("  SCL=pin" + String(bus->pin_1) + ", SDA=pin" + String(bus->pin_2) + ", Speed=" + String(busSpeed) + "Hz");
+            }
+        }
+        else if(bus->bus_type == 0x02){
+            writeSerial("SPI bus " + String(i) + " detected (not yet implemented)");
+            writeSerial("  Instance: " + String(bus->instance_number));
+        }
+        else{
+            writeSerial("WARNING: Unknown bus type 0x" + String(bus->bus_type, HEX) + " for bus " + String(i));
+        }
+    }
+    writeSerial("=== Data Bus Initialization Complete ===");
+}
+
+void scanI2CDevices(){
+    writeSerial("=== Scanning I2C Bus for Devices ===");
+    uint8_t deviceCount = 0;
+    uint8_t foundDevices[128];
+    for(uint8_t address = 0x08; address < 0x78; address++){
+        Wire.beginTransmission(address);
+        uint8_t error = Wire.endTransmission();
+        if(error == 0){
+            foundDevices[deviceCount] = address;
+            deviceCount++;
+            writeSerial("I2C device found at address 0x" + String(address, HEX) + " (" + String(address) + ")");
+        }
+        else if(error == 4){
+            writeSerial("ERROR: Unknown error at address 0x" + String(address, HEX));
+        }
+    }
+    if(deviceCount == 0){
+        writeSerial("No I2C devices found on bus");
+    } else {
+        writeSerial("Found " + String(deviceCount) + " I2C device(s)");
+        writeSerial("Device addresses: ");
+        String addrList = "";
+        for(uint8_t i = 0; i < deviceCount; i++){
+            if(i > 0) addrList += ", ";
+            addrList += "0x" + String(foundDevices[i], HEX);
+        }
+        writeSerial(addrList);
+    }
+    writeSerial("=== I2C Scan Complete ===");
+}
+
+void initSensors(){
+    writeSerial("=== Initializing Sensors ===");
+    if(globalConfig.sensor_count == 0){
+        writeSerial("No sensors configured");
+        return;
+    }
+    for(uint8_t i = 0; i < globalConfig.sensor_count; i++){
+        struct SensorData* sensor = &globalConfig.sensors[i];
+        writeSerial("Initializing sensor " + String(i) + " (instance " + String(sensor->instance_number) + ")");
+        writeSerial("  Type: 0x" + String(sensor->sensor_type, HEX));
+        writeSerial("  Bus ID: " + String(sensor->bus_id));
+        if(sensor->sensor_type == 0x0003){ // AXP2101 PMIC
+            writeSerial("  Detected AXP2101 PMIC sensor");
+            initAXP2101(sensor->bus_id);
+            delay(100);
+            readAXP2101Data();
+        }
+        else if(sensor->sensor_type == 0x0001){ // Temperature sensor
+            writeSerial("  Temperature sensor (initialization not implemented)");
+        }
+        else if(sensor->sensor_type == 0x0002){ // Humidity sensor
+            writeSerial("  Humidity sensor (initialization not implemented)");
+        }
+        else{
+            writeSerial("  Unknown sensor type 0x" + String(sensor->sensor_type, HEX));
+        }
+    }
+    writeSerial("=== Sensor Initialization Complete ===");
+}
+
+void initAXP2101(uint8_t busId){
+    writeSerial("=== Initializing AXP2101 PMIC ===");
+    if(busId >= globalConfig.data_bus_count){
+        writeSerial("ERROR: Invalid bus ID " + String(busId) + " (only " + String(globalConfig.data_bus_count) + " buses configured)");
+        return;
+    }
+    struct DataBus* bus = &globalConfig.data_buses[busId];
+    if(bus->bus_type != 0x01){
+        writeSerial("ERROR: Bus " + String(busId) + " is not an I2C bus");
+        return;
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    uint8_t error = Wire.endTransmission();
+    if(error != 0){
+        writeSerial("ERROR: AXP2101 not found at address 0x" + String(AXP2101_SLAVE_ADDRESS, HEX) + " (error: " + String(error) + ")");
+        return;
+    }
+    writeSerial("AXP2101 detected at address 0x" + String(AXP2101_SLAVE_ADDRESS, HEX));
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_POWER_STATUS);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            uint8_t status = Wire.read();
+            writeSerial("Power status: 0x" + String(status, HEX));
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_DC_VOL0_CTRL);
+    Wire.write(0x12); // 18 decimal = 0x12, gives 3.3V (1500 + 18*100 = 3300)
+    error = Wire.endTransmission();
+    if(error == 0){
+        writeSerial("DCDC1 voltage set to 3.3V");
+    } else {
+        writeSerial("ERROR: Failed to set DCDC1 voltage");
+    }
+    delay(10); // Small delay after setting voltage
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
+    error = Wire.endTransmission();
+    uint8_t dcEnable = 0x00;
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            dcEnable = Wire.read();
+        }
+    }
+    dcEnable |= 0x01;
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
+    Wire.write(dcEnable);
+    error = Wire.endTransmission();
+    if(error == 0){
+        writeSerial("DCDC1 enabled (3.3V)");
+    } else {
+        writeSerial("ERROR: Failed to enable DCDC1");
+    }
+    delay(10);
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
+    error = Wire.endTransmission();
+    uint8_t aldoEnable = 0x00;
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            aldoEnable = Wire.read();
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_VOL2_CTRL);
+    error = Wire.endTransmission();
+    uint8_t aldo3VolReg = 0x00;
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            aldo3VolReg = Wire.read();
+        }
+    }
+    aldo3VolReg = (aldo3VolReg & 0xE0) | 0x1C;
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_VOL2_CTRL);
+    Wire.write(aldo3VolReg);
+    error = Wire.endTransmission();
+    if(error == 0){
+        writeSerial("ALDO3 voltage set to 3.3V");
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_VOL3_CTRL);
+    error = Wire.endTransmission();
+    uint8_t aldo4VolReg = 0x00;
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            aldo4VolReg = Wire.read();
+        }
+    }
+    aldo4VolReg = (aldo4VolReg & 0xE0) | 0x1C; // Preserve upper bits, set voltage
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_VOL3_CTRL);
+    Wire.write(aldo4VolReg);
+    error = Wire.endTransmission();
+    if(error == 0){
+        writeSerial("ALDO4 voltage set to 3.3V");
+    }
+    aldoEnable |= 0x0C; // Set bits 2 and 3 for ALDO3 and ALDO4
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
+    Wire.write(aldoEnable);
+    error = Wire.endTransmission();
+    if(error == 0){
+        writeSerial("ALDO3 and ALDO4 enabled (3.3V)");
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_POWER_WAKEUP_CTL);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            uint8_t wakeupCtl = Wire.read();
+            writeSerial("Wakeup control: 0x" + String(wakeupCtl, HEX));
+            if(wakeupCtl & 0x01){
+                writeSerial("Wakeup already enabled");
+            } else {
+                Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+                Wire.write(AXP2101_REG_POWER_WAKEUP_CTL);
+                Wire.write(wakeupCtl | 0x01); // Set bit 0
+                error = Wire.endTransmission();
+                if(error == 0){
+                    writeSerial("Wakeup enabled");
+                }
+            }
+        }
+    }
+    writeSerial("=== AXP2101 PMIC Initialization Complete ===");
+}
+
+void readAXP2101Data(){
+    writeSerial("=== Reading AXP2101 PMIC Data ===");
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    uint8_t error = Wire.endTransmission();
+    if(error != 0){
+        writeSerial("ERROR: AXP2101 not found at address 0x" + String(AXP2101_SLAVE_ADDRESS, HEX));
+        return;
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_ADC_CHANNEL_CTRL);
+    Wire.write(0xFF); // Enable all ADC channels
+    error = Wire.endTransmission();
+    delay(10); // Wait for ADC to stabilize
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_POWER_STATUS);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
+        if(Wire.available() >= 2){
+            uint8_t status1 = Wire.read();
+            uint8_t status2 = Wire.read();
+            writeSerial("Power Status 1: 0x" + String(status1, HEX));
+            writeSerial("Power Status 2: 0x" + String(status2, HEX));
+            bool batteryPresent = (status1 & 0x20) != 0;
+            bool charging = (status1 & 0x04) != 0;
+            bool vbusPresent = (status1 & 0x08) != 0;
+            writeSerial("Battery Present: " + String(batteryPresent ? "Yes" : "No"));
+            writeSerial("Charging: " + String(charging ? "Yes" : "No"));
+            writeSerial("VBUS Present: " + String(vbusPresent ? "Yes" : "No"));
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_PWRON_STATUS);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            uint8_t pwronStatus = Wire.read();
+            writeSerial("Power On Status: 0x" + String(pwronStatus, HEX));
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_ADC_DATA_BAT_VOL_H);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
+        if(Wire.available() >= 2){
+            uint8_t batVolH = Wire.read();
+            uint8_t batVolL = Wire.read();
+            // Battery voltage = (H << 4 | L) * 0.5mV
+            uint16_t batVolRaw = ((uint16_t)batVolH << 4) | (batVolL & 0x0F);
+            float batVoltage = batVolRaw * 0.5; // in mV
+            writeSerial("Battery Voltage: " + String(batVoltage, 1) + " mV (" + String(batVoltage / 1000.0, 2) + " V)");
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_ADC_DATA_VBUS_VOL_H);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
+        if(Wire.available() >= 2){
+            uint8_t vbusVolH = Wire.read();
+            uint8_t vbusVolL = Wire.read();
+            // VBUS voltage = (H << 4 | L) * 1.7mV
+            uint16_t vbusVolRaw = ((uint16_t)vbusVolH << 4) | (vbusVolL & 0x0F);
+            float vbusVoltage = vbusVolRaw * 1.7; // in mV
+            writeSerial("VBUS Voltage: " + String(vbusVoltage, 1) + " mV (" + String(vbusVoltage / 1000.0, 2) + " V)");
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_ADC_DATA_SYS_VOL_H);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
+        if(Wire.available() >= 2){
+            uint8_t sysVolH = Wire.read();
+            uint8_t sysVolL = Wire.read();
+            // System voltage = (H << 4 | L) * 1.4mV
+            uint16_t sysVolRaw = ((uint16_t)sysVolH << 4) | (sysVolL & 0x0F);
+            float sysVoltage = sysVolRaw * 1.4; // in mV
+            writeSerial("System Voltage: " + String(sysVoltage, 1) + " mV (" + String(sysVoltage / 1000.0, 2) + " V)");
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_BAT_PERCENT_DATA);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            uint8_t batPercent = Wire.read();
+            if(batPercent <= 100){
+                writeSerial("Battery Percentage: " + String(batPercent) + "%");
+            } else {
+                writeSerial("Battery Percentage: Not available (fuel gauge may be disabled)");
+            }
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            uint8_t dcEnable = Wire.read();
+            writeSerial("DC Enable Status: 0x" + String(dcEnable, HEX));
+            writeSerial("  DCDC1: " + String((dcEnable & 0x01) ? "ON" : "OFF"));
+            writeSerial("  DCDC2: " + String((dcEnable & 0x02) ? "ON" : "OFF"));
+            writeSerial("  DCDC3: " + String((dcEnable & 0x04) ? "ON" : "OFF"));
+            writeSerial("  DCDC4: " + String((dcEnable & 0x08) ? "ON" : "OFF"));
+            writeSerial("  DCDC5: " + String((dcEnable & 0x10) ? "ON" : "OFF"));
+        }
+    }
+    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
+    error = Wire.endTransmission();
+    if(error == 0){
+        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
+        if(Wire.available()){
+            uint8_t aldoEnable = Wire.read();
+            writeSerial("ALDO Enable Status: 0x" + String(aldoEnable, HEX));
+            writeSerial("  ALDO1: " + String((aldoEnable & 0x01) ? "ON" : "OFF"));
+            writeSerial("  ALDO2: " + String((aldoEnable & 0x02) ? "ON" : "OFF"));
+            writeSerial("  ALDO3: " + String((aldoEnable & 0x04) ? "ON" : "OFF"));
+            writeSerial("  ALDO4: " + String((aldoEnable & 0x08) ? "ON" : "OFF"));
+        }
+    }
+    
+    writeSerial("=== AXP2101 Data Read Complete ===");
 }
 //placeholder function for the actual payload 
 void updatemsdata(){
@@ -507,6 +906,15 @@ void initDisplay(){
     epd.print("Name: OEPL"+ chipId);
     epd.setCursor(100, 300); 
     epd.print("Epaper driver by Larry Bank https://github.com/bitbank2");
+    if(globalConfig.displays[0].color_scheme == 4){
+        writeSerial("6 color test");
+        epd.fillRect(100,320,10,10,BBEP_RED);
+        epd.fillRect(110,320,10,10,BBEP_GREEN);
+        epd.fillRect(120,320,10,10,BBEP_BLUE);
+        epd.fillRect(130,320,10,10,BBEP_YELLOW);
+        epd.fillRect(140,320,10,10,BBEP_BLACK);
+        epd.fillRect(150,320,10,10,BBEP_WHITE);
+    }
     }
     else{
     epd.setFont(FONT_6x8);
@@ -524,10 +932,8 @@ void initDisplay(){
     writeSerial("Writing plane...");
     epd.writePlane();
     writeSerial("Refreshing display...");
-
     epd.refresh(REFRESH_FULL, false);
     waitforrefresh(60);
-
     uint16_t newrotation = globalConfig.displays[0].rotation * 90 + 270;
     if(newrotation >= 360)newrotation = newrotation - 360;
     epd.setRotation(newrotation);    

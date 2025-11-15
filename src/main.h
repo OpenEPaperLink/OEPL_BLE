@@ -13,11 +13,17 @@ using namespace Adafruit_LittleFS_Namespace;
 #include <LittleFS.h>
 #endif
 
+#include <Wire.h>
+
 #define DECOMP_CHUNK 512
 #define MAX_DECOMPRESSED_SIZE (512 * 1024)
 #define DECOMP_CHUNK_SIZE 4096
 #define MAX_DICT_SIZE 32768
+#ifdef TARGET_LARGE_MEMORY
+#define MAX_IMAGE_SIZE (100 * 1024)
+#else
 #define MAX_IMAGE_SIZE (50 * 1024)
+#endif
 #define MAX_BLOCKS 16
 #define CONFIG_FILE_PATH "/config.bin"
 #define MAX_CONFIG_SIZE 4096
@@ -100,6 +106,11 @@ void drawImageData();
 void drawLogo(int x, int y);
 void busyCallback(const void*);
 void initio();
+void initDataBuses();
+void scanI2CDevices();
+void initSensors();
+void initAXP2101(uint8_t busId);
+void readAXP2101Data();
 void updatemsdata();
 void cleanupImageMemory();
 bool decompressImageDataChunked();
@@ -156,3 +167,23 @@ struct GlobalConfig globalConfig = {0};
 uint8_t configReadResponseBuffer[128];
 
 extern struct GlobalConfig globalConfig;
+
+#define AXP2101_SLAVE_ADDRESS 0x34
+#define AXP2101_REG_POWER_STATUS 0x00
+#define AXP2101_REG_POWER_ON_STATUS 0x01
+#define AXP2101_REG_POWER_OFF_STATUS 0x02
+#define AXP2101_REG_DC_ONOFF_DVM_CTRL 0x80
+#define AXP2101_REG_LDO_ONOFF_CTRL0 0x90
+#define AXP2101_REG_DC_VOL0_CTRL 0x82  // DCDC1 voltage
+#define AXP2101_REG_LDO_VOL2_CTRL 0x94  // ALDO3 voltage
+#define AXP2101_REG_LDO_VOL3_CTRL 0x95  // ALDO4 voltage
+#define AXP2101_REG_POWER_WAKEUP_CTL 0x26
+#define AXP2101_REG_ADC_CHANNEL_CTRL 0x30
+#define AXP2101_REG_ADC_DATA_BAT_VOL_H 0x34
+#define AXP2101_REG_ADC_DATA_BAT_VOL_L 0x35
+#define AXP2101_REG_ADC_DATA_VBUS_VOL_H 0x36
+#define AXP2101_REG_ADC_DATA_VBUS_VOL_L 0x37
+#define AXP2101_REG_ADC_DATA_SYS_VOL_H 0x38
+#define AXP2101_REG_ADC_DATA_SYS_VOL_L 0x39
+#define AXP2101_REG_BAT_PERCENT_DATA 0xA4
+#define AXP2101_REG_PWRON_STATUS 0x20
