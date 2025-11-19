@@ -893,13 +893,24 @@ void initDisplay(){
     writeSerial(String("Width: ") + String(epd.width()));
     epd.allocBuffer();
     if(globalConfig.displays[0].color_scheme == 1)epd.allocBuffer(true);
-    epd.fillScreen(BBEP_WHITE);
-    epd.setTextColor(BBEP_BLACK, BBEP_WHITE);
+    // For 4 grayscale mode, use GRAY3 (white) and GRAY0 (black)
+    if(globalConfig.displays[0].color_scheme == 5){
+        epd.fillScreen(BBEP_GRAY3);
+        epd.setTextColor(BBEP_GRAY0, BBEP_GRAY3);
+    } else {
+        epd.fillScreen(BBEP_WHITE);
+        epd.setTextColor(BBEP_BLACK, BBEP_WHITE);
+    }
     String chipId = getChipIdHex();
     writeSerial("Chip ID for display: " + chipId);
     if(epd.width() > 500){
     epd.setFont(FONT_12x16);
-    epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_BLACK);
+    // Use appropriate color constants based on color scheme
+    if(globalConfig.displays[0].color_scheme == 5){
+        epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_GRAY0);
+    } else {
+        epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_BLACK);
+    }
     epd.setCursor(100, 100); 
     epd.print("openepaperlink.org");
     epd.setCursor(100, 200); 
@@ -914,6 +925,13 @@ void initDisplay(){
         epd.fillRect(130,320,10,10,BBEP_YELLOW);
         epd.fillRect(140,320,10,10,BBEP_BLACK);
         epd.fillRect(150,320,10,10,BBEP_WHITE);
+    }
+    if(globalConfig.displays[0].color_scheme == 5){
+        writeSerial("4 grayscale test");
+        epd.fillRect(100,320,10,10,BBEP_GRAY0);
+        epd.fillRect(110,320,10,10,BBEP_GRAY1);
+        epd.fillRect(120,320,10,10,BBEP_GRAY2);
+        epd.fillRect(130,320,10,10,BBEP_GRAY3);
     }
     }
     else{
@@ -1107,12 +1125,25 @@ void handleImageInfo(uint8_t* data, uint16_t len) {
     writeSerial("  Next check in: " + String(nextCheckIn));
     writeSerial("Setting up image data buffer...");
     cleanupImageMemory();
-    if (dataSize > MAX_IMAGE_SIZE) {
-        writeSerial("ERROR: Image too large (" + String(dataSize) + " bytes, max: " + String(MAX_IMAGE_SIZE) + " bytes)");
+    bool isCompressed = (dataType == 0x30);
+    uint32_t maxSize = isCompressed ? MAX_COMPRESSED_SIZE : MAX_IMAGE_SIZE;
+    if (dataSize > maxSize) {
+        writeSerial("ERROR: Image too large (" + String(dataSize) + " bytes, max: " + String(maxSize) + " bytes)");
         return;
     }
-    currentImage.data = imageDataBuffer;
-    writeSerial("Using global image buffer: " + String(dataSize) + " bytes");
+    // For compressed images larger than static buffer, allocate dynamically
+    // For uncompressed or small compressed images, use static buffer
+    if (isCompressed && dataSize > MAX_IMAGE_SIZE) {
+        currentImage.data = (uint8_t*)malloc(dataSize);
+        if (currentImage.data == nullptr) {
+            writeSerial("ERROR: Failed to allocate " + String(dataSize) + " bytes for compressed image");
+            return;
+        }
+        writeSerial("Allocated dynamic buffer: " + String(dataSize) + " bytes");
+    } else {
+        currentImage.data = imageDataBuffer;
+        writeSerial("Using static image buffer: " + String(dataSize) + " bytes");
+    }
     currentImage.size = dataSize;
     currentImage.received = 0;
     currentImage.dataType = dataType;
@@ -1395,6 +1426,86 @@ void drawImageData() {
             }
         }
     }
+    else if (currentImage.dataType == 0x22) {
+        writeSerial("6-color image detected, drawing with full color support...");
+        uint32_t pixelIndex = 0;
+        uint32_t planeSize = currentImage.size / 3; // Each plane is 1/3 of total size
+        uint32_t redPlaneOffset = planeSize; // Second plane (R/Y)
+        uint32_t greenPlaneOffset = planeSize * 2; // Third plane (G/B)
+        
+        for (uint16_t y = 0; y < displayWidth; y++) {
+            for (uint16_t x = 0; x < displayHeight; x++) {
+                if (pixelIndex >= planeSize) break;
+                uint8_t pixelByte = ~currentImage.data[pixelIndex]; // First plane (B/W) is inverted
+                uint8_t redByte = currentImage.data[pixelIndex + redPlaneOffset]; // Second plane (R/Y)
+                uint8_t greenByte = currentImage.data[pixelIndex + greenPlaneOffset]; // Third plane (G/B)
+                
+                for (int bit = 7; bit >= 0; bit--) {
+                    if (x >= displayHeight) break;
+                    
+                    bool plane1 = (pixelByte >> bit) & 0x01; // B/W base
+                    bool plane2 = (redByte >> bit) & 0x01;   // R/Y
+                    bool plane3 = (greenByte >> bit) & 0x01;  // G/B
+                    
+                    // Decode 6 colors: BLACK=000, WHITE=100, RED=110, YELLOW=010, GREEN=101, BLUE=001
+                    if (!plane1 && !plane2 && !plane3) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
+                    } else if (plane1 && !plane2 && !plane3) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
+                    } else if (plane1 && plane2 && !plane3) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_RED);
+                    } else if (!plane1 && plane2 && !plane3) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_YELLOW);
+                    } else if (plane1 && !plane2 && plane3) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_GREEN);
+                    } else if (!plane1 && !plane2 && plane3) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_BLUE);
+                    } else {
+                        // Fallback for unused combinations (111, 011)
+                        epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
+                    }
+                    x++;
+                }
+                x--;
+                pixelIndex++;
+            }
+        }
+    }
+    else if (currentImage.dataType == 0x23) {
+        writeSerial("4-grayscale image detected, drawing with grayscale support...");
+        uint32_t pixelIndex = 0;
+        uint16_t imgWidth = currentImage.width;
+        uint16_t imgHeight = currentImage.height;
+        uint16_t bytesPerRow = (imgWidth + 3) / 4; // Round up to handle width not divisible by 4
+        
+        for (uint16_t y = 0; y < displayWidth && y < imgHeight; y++) {
+            for (uint16_t byteInRow = 0; byteInRow < bytesPerRow; byteInRow++) {
+                if (pixelIndex >= currentImage.size) break;
+                uint8_t pixelByte = currentImage.data[pixelIndex];
+                uint16_t xStart = byteInRow * 4;
+                
+                // 4 grayscale: 2 bits per pixel, 4 pixels per byte
+                // Encoding: 00=Black (GRAY0), 01=DarkGray (GRAY1), 10=LightGray (GRAY2), 11=White (GRAY3)
+                for (int pixel = 0; pixel < 4; pixel++) {
+                    uint16_t x = xStart + pixel;
+                    if (x >= displayHeight || x >= imgWidth) break;
+                    
+                    uint8_t grayLevel = (pixelByte >> (6 - pixel * 2)) & 0x03;
+                    // Map grayscale levels using constants: GRAY0=black, GRAY1=dark gray, GRAY2=light gray, GRAY3=white
+                    if (grayLevel == 0) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY0);
+                    } else if (grayLevel == 1) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY1);
+                    } else if (grayLevel == 2) {
+                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY2);
+                    } else {
+                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY3);
+                    }
+                }
+                pixelIndex++;
+            }
+        }
+    }
     else if (currentImage.dataType == 0x30) {
         writeSerial("Compressed image detected, decompressing with chunked approach...");
         if (!decompressImageDataChunked()) {
@@ -1404,7 +1515,7 @@ void drawImageData() {
         writeSerial("Chunked decompression and drawing complete.");
     }
     else {
-        writeSerial("ERROR: Unsupported image type.");
+        writeSerial("ERROR: Unsupported image type: 0x" + String(currentImage.dataType, HEX));
     }
     writeSerial("Image drawing complete.");
 }
@@ -1462,11 +1573,9 @@ void handleDisplayInfo(){
     for (int i = 0; i < 4; i++) {
         response[offset++] = 0x00;
     }
-    // Offset 30: Color count (1=BW, 2=BWR/BWY, 3=BWRY)
-    // Our display is monochrome (black/white only)
-    if(globalConfig.displays[0].color_scheme == 0)response[offset++] = 0x01; // Monochrome
-    else if(globalConfig.displays[0].color_scheme == 1)response[offset++] = 0x02;
-    else response[offset++] = 0x00;
+    // Offset 30: Color scheme (0=bw, 1=bwr, 2=bwy, 3=bwry, 4=bwgbry, 5=bw4)
+    // Send actual color_scheme value
+    response[offset++] = globalConfig.displays[0].color_scheme & 0xFF;
     
     writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: " + String(globalConfig.displays[0].color_scheme));
     // Send the response
@@ -1496,9 +1605,8 @@ void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
-    if(globalConfig.displays[0].color_scheme == 0)buffer[offset++] = 0x01; // Monochrome
-    else if(globalConfig.displays[0].color_scheme == 1)buffer[offset++] = 0x02;
-    else buffer[offset++] = 0x00;
+    // Send actual color_scheme value (0-5) instead of simplified color count
+    buffer[offset++] = globalConfig.displays[0].color_scheme & 0xFF;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
     buffer[offset++] = 0x00;
@@ -1619,6 +1727,11 @@ void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
 
 void cleanupImageMemory() {
     writeSerial("=== CLEANING UP IMAGE MEMORY ===");
+    // Free dynamically allocated buffer if it exists
+    if (currentImage.data != nullptr && currentImage.data != imageDataBuffer) {
+        free(currentImage.data);
+        writeSerial("Freed dynamically allocated image buffer");
+    }
     memset(imageDataBuffer, 0, MAX_IMAGE_SIZE);
     memset(blocksReceived, 0, MAX_BLOCKS * sizeof(bool));
     memset(blockBytesReceived, 0, MAX_BLOCKS * sizeof(uint32_t));
@@ -1683,6 +1796,10 @@ bool decompressImageDataChunked(){
     // Buffer for colored image first plane
     uint8_t* firstPlaneBuffer = nullptr;
     uint32_t firstPlaneSize = 0;
+    // Buffers for 6-color image (planes 2 and 3)
+    uint8_t* secondPlaneBuffer = nullptr;
+    uint8_t* thirdPlaneBuffer = nullptr;
+    uint32_t secondPlaneSize = 0;
     writeSerial("Starting chunked decompression and direct drawing...");
     int res;
     do {
@@ -1712,7 +1829,7 @@ bool decompressImageDataChunked(){
                         writeSerial("Drawing bounds: " + String(drawWidth) + "x" + String(drawHeight));
                         
                         // Allocate buffer for colored image first plane
-                        if (colorType == 2) {
+                        if (colorType == 2 || colorType == 3) {
                             firstPlaneSize = (imgWidth * imgHeight) / 8;
                             firstPlaneBuffer = (uint8_t*)malloc(firstPlaneSize);
                             if (!firstPlaneBuffer) {
@@ -1720,6 +1837,19 @@ bool decompressImageDataChunked(){
                                 return false;
                             }
                             writeSerial("Allocated first plane buffer: " + String(firstPlaneSize) + " bytes");
+                        }
+                        if (colorType == 3) {
+                            // For 6-color, we also need buffers for planes 2 and 3
+                            secondPlaneSize = firstPlaneSize;
+                            secondPlaneBuffer = (uint8_t*)malloc(secondPlaneSize);
+                            thirdPlaneBuffer = (uint8_t*)malloc(secondPlaneSize);
+                            if (!secondPlaneBuffer || !thirdPlaneBuffer) {
+                                writeSerial("ERROR: Failed to allocate 6-color plane buffers");
+                                if (secondPlaneBuffer) free(secondPlaneBuffer);
+                                if (thirdPlaneBuffer) free(thirdPlaneBuffer);
+                                return false;
+                            }
+                            writeSerial("Allocated 6-color plane buffers: " + String(secondPlaneSize) + " bytes each");
                         }
                     }
                 } else {
@@ -1733,6 +1863,31 @@ bool decompressImageDataChunked(){
                             if (y < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && x + (7-bit) < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
                                 bool pixelValue = (byte >> bit) & 0x01;
                                 epd.drawPixel(displayWidth - y, x + (7-bit), pixelValue ? BBEP_BLACK : BBEP_WHITE);
+                            }
+                        }
+                    } else if (colorType == 4) {
+                        // 4-grayscale image: 2 bits per pixel, 4 pixels per byte
+                        // Encoding: 00=Black (GRAY0), 01=DarkGray (GRAY1), 10=LightGray (GRAY2), 11=White (GRAY3)
+                        // Calculate position: bytes per row = imgWidth / 4 (4 pixels per byte)
+                        uint16_t bytesPerRow = (imgWidth + 3) / 4; // Round up
+                        uint16_t y = pixelByteIndex / bytesPerRow;
+                        uint16_t byteInRow = pixelByteIndex % bytesPerRow;
+                        uint16_t xStart = byteInRow * 4;
+                        
+                        for (int pixel = 0; pixel < 4; pixel++) {
+                            uint16_t x = xStart + pixel;
+                            if (y < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && x < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
+                                uint8_t grayLevel = (byte >> (6 - pixel * 2)) & 0x03;
+                                // Map grayscale levels using constants: GRAY0=black, GRAY1=dark gray, GRAY2=light gray, GRAY3=white
+                                if (grayLevel == 0) {
+                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY0);
+                                } else if (grayLevel == 1) {
+                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY1);
+                                } else if (grayLevel == 2) {
+                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY2);
+                                } else {
+                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY3);
+                                }
                             }
                         }
                     } else if (colorType == 2) {
@@ -1770,6 +1925,60 @@ bool decompressImageDataChunked(){
                                 }
                             }
                         }
+                    } else if (colorType == 3) {
+                        // 6-color image - triple plane encoding
+                        uint32_t planeSize = firstPlaneSize;
+                        uint32_t redPlaneOffset = planeSize;
+                        uint32_t greenPlaneOffset = planeSize * 2;
+                        
+                        if (pixelByteIndex < redPlaneOffset) {
+                            // First plane (inverted B/W data) - store in buffer
+                            if (pixelByteIndex < firstPlaneSize) {
+                                firstPlaneBuffer[pixelByteIndex] = byte;
+                            }
+                        } else if (pixelByteIndex < greenPlaneOffset) {
+                            // Second plane (R/Y data) - store in buffer
+                            uint32_t secondPlaneIndex = pixelByteIndex - redPlaneOffset;
+                            if (secondPlaneIndex < secondPlaneSize) {
+                                secondPlaneBuffer[secondPlaneIndex] = byte;
+                            }
+                        } else {
+                            // Third plane (G/B data) - combine with first and second planes
+                            uint32_t thirdPlaneIndex = pixelByteIndex - greenPlaneOffset;
+                            if (thirdPlaneIndex < secondPlaneSize) {
+                                uint8_t firstPlaneByte = firstPlaneBuffer[thirdPlaneIndex];
+                                uint8_t secondPlaneByte = secondPlaneBuffer[thirdPlaneIndex];
+                                uint8_t invertedFirstPlane = ~firstPlaneByte;
+                                uint16_t planeY = thirdPlaneIndex / (imgWidth / 8);
+                                uint16_t planeX = (thirdPlaneIndex % (imgWidth / 8)) * 8;
+                                
+                                for (int bit = 7; bit >= 0; bit--) {
+                                    if (planeY < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && planeX + (7-bit) < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
+                                        bool plane1 = (invertedFirstPlane >> bit) & 0x01; // B/W base
+                                        bool plane2 = (secondPlaneByte >> bit) & 0x01;   // R/Y
+                                        bool plane3 = (byte >> bit) & 0x01;              // G/B
+                                        
+                                        // Decode 6 colors: BLACK=000, WHITE=100, RED=110, YELLOW=010, GREEN=101, BLUE=001
+                                        if (!plane1 && !plane2 && !plane3) {
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
+                                        } else if (plane1 && !plane2 && !plane3) {
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_WHITE);
+                                        } else if (plane1 && plane2 && !plane3) {
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_RED);
+                                        } else if (!plane1 && plane2 && !plane3) {
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_YELLOW);
+                                        } else if (plane1 && !plane2 && plane3) {
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_GREEN);
+                                        } else if (!plane1 && !plane2 && plane3) {
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLUE);
+                                        } else {
+                                            // Fallback for unused combinations (111, 011)
+                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     pixelBytesProcessed++;
                 }
@@ -1785,10 +1994,18 @@ bool decompressImageDataChunked(){
     writeSerial("Expected: " + String(originalLength) + " bytes");
     writeSerial("Pixel bytes processed: " + String(pixelBytesProcessed));
     
-    // Cleanup allocated buffer
+    // Cleanup allocated buffers
     if (firstPlaneBuffer) {
         free(firstPlaneBuffer);
         writeSerial("Freed first plane buffer");
+    }
+    if (secondPlaneBuffer) {
+        free(secondPlaneBuffer);
+        writeSerial("Freed second plane buffer");
+    }
+    if (thirdPlaneBuffer) {
+        free(thirdPlaneBuffer);
+        writeSerial("Freed third plane buffer");
     }
     
     if (res != TINF_DONE && res != TINF_OK) {

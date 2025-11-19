@@ -21,10 +21,12 @@ using namespace Adafruit_LittleFS_Namespace;
 #define MAX_DICT_SIZE 32768
 #ifdef TARGET_LARGE_MEMORY
 #define MAX_IMAGE_SIZE (100 * 1024)
+#define MAX_COMPRESSED_SIZE (200 * 1024)  // Allow larger compressed images (only need to store compressed data)
 #else
 #define MAX_IMAGE_SIZE (50 * 1024)
+#define MAX_COMPRESSED_SIZE (100 * 1024)  // Allow larger compressed images (only need to store compressed data)
 #endif
-#define MAX_BLOCKS 16
+#define MAX_BLOCKS 64  // Increased to support larger compressed images (27+ blocks)
 #define CONFIG_FILE_PATH "/config.bin"
 #define MAX_CONFIG_SIZE 4096
 
