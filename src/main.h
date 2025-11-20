@@ -3,6 +3,18 @@
 #include "uzlib.h"
 #include <bb_epaper.h>
 
+// Firmware version - parsed from BUILD_VERSION at compile time
+#ifndef BUILD_VERSION
+#define BUILD_VERSION "0.0"
+#endif
+#ifndef SHA
+#define SHA ""
+#endif
+// Helper macros to properly stringify SHA (handles both quoted and unquoted defines)
+#define STRINGIFY(x) #x
+#define XSTRINGIFY(x) STRINGIFY(x)
+#define SHA_STRING XSTRINGIFY(SHA)
+
 #ifdef TARGET_NRF
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
@@ -82,6 +94,12 @@ uint8_t dictionaryBuffer[MAX_DICT_SIZE];
 uint8_t headerBuffer[6];
 uint8_t bleResponseBuffer[94];
 
+// WiFi configuration (from packet 0x26)
+char wifiSsid[33] = {0};  // 32 bytes + null terminator
+char wifiPassword[33] = {0};  // 32 bytes + null terminator
+uint8_t wifiEncryptionType = 0;  // 0x00=none, 0x01=WEP, 0x02=WPA, 0x03=WPA2, 0x04=WPA3
+bool wifiConfigured = false;  // True if WiFi config packet (0x26) was received and parsed
+
 bool waitforrefresh(int timeout);
 void pwrmgm(bool onoff);
 void writeSerial(String message, bool newLine = true);
@@ -126,6 +144,7 @@ uint32_t calculateConfigCRC(uint8_t* data, uint32_t len);
 void handleReadConfig();
 void handleWriteConfig(uint8_t* data, uint16_t len);
 void handleWriteConfigChunk(uint8_t* data, uint16_t len);
+void handleFirmwareVersion();
 void printConfigSummary();
 void reboot();
 bool loadGlobalConfig();
@@ -145,6 +164,8 @@ struct BinaryInputs* getBinaryInput(uint8_t index);
 uint8_t getBinaryInputCount();
 void printConfigSummary();
 int mapEpd(int id);
+uint8_t getFirmwareMajor();
+uint8_t getFirmwareMinor();
 
 typedef struct {
     bool active;
