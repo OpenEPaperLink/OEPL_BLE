@@ -26,6 +26,7 @@ jobs:
 
       - name: Build & Package NRF Firmware
         run: |
+          export PLATFORMIO_BUILD_FLAGS="-D BUILD_VERSION=${{ github.ref_name }} -D SHA=$GITHUB_SHA"
           pio run --environment oeplnrf 
           mkdir firmware_output
           cp .pio/build/oeplnrf/firmware.hex firmware_output/NRF52840.hex
@@ -35,6 +36,7 @@ jobs:
 
       - name: Build & Package esp32-s3-N16R8 Firmware
         run: |
+          export PLATFORMIO_BUILD_FLAGS="-D BUILD_VERSION=${{ github.ref_name }} -D SHA=$GITHUB_SHA"
           pioenv=oeplesp32-s3-N16R8
           pio run --environment ${pioenv}
           mkdir ${pioenv}
@@ -50,6 +52,7 @@ jobs:
 
       - name: Build & Package esp32-s3-N8R8 Firmware
         run: |
+          export PLATFORMIO_BUILD_FLAGS="-D BUILD_VERSION=${{ github.ref_name }} -D SHA=$GITHUB_SHA"
           pioenv=oeplesp32-s3-N8R8
           pio run --environment ${pioenv}
           mkdir ${pioenv}
@@ -65,6 +68,7 @@ jobs:
 
       - name: Build & Package esp32-s3-N32R8 Firmware
         run: |
+          export PLATFORMIO_BUILD_FLAGS="-D BUILD_VERSION=${{ github.ref_name }} -D SHA=$GITHUB_SHA"
           pioenv=oeplesp32-s3-N32R8
           pio run --environment ${pioenv}
           mkdir ${pioenv}
@@ -80,6 +84,7 @@ jobs:
           
       - name: Build & Package esp32-c6-N4 Firmware
         run: |
+          export PLATFORMIO_BUILD_FLAGS="-D BUILD_VERSION=${{ github.ref_name }} -D SHA=$GITHUB_SHA"
           pioenv=esp32-c6-N4
           pio run --environment ${pioenv}
           mkdir ${pioenv}
@@ -95,6 +100,7 @@ jobs:
 
       - name: Build & Package esp32-c3-N4 Firmware
         run: |
+          export PLATFORMIO_BUILD_FLAGS="-D BUILD_VERSION=${{ github.ref_name }} -D SHA=$GITHUB_SHA"
           pioenv=esp32-c3-N4
           pio run --environment ${pioenv}
           mkdir ${pioenv}

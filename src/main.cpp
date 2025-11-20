@@ -100,6 +100,22 @@ MyBLECharacteristicCallbacks* charCallbacks = nullptr;
 
 void setup() {
     Serial.begin(115200);
+    delay(100);  // Give serial time to initialize
+    writeSerial("=== FIRMWARE INFO ===");
+    writeSerial("Firmware Version: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()));
+    // SHA_STRING is already a string literal from the macro, so we can use it directly
+    const char* shaCStr = SHA_STRING;
+    String shaStr = String(shaCStr);
+    // Remove surrounding quotes if present (from stringification when SHA is empty string "")
+    if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
+        shaStr = shaStr.substring(1, shaStr.length() - 1);
+    }
+    if (shaStr.length() > 0 && shaStr != "\"\"" && shaStr != "") {
+        writeSerial("Git SHA: " + shaStr);
+    } else {
+        writeSerial("Git SHA: (not set)");
+    }
+    writeSerial("=====================");
     writeSerial("Starting setup...");
     writeSerial("Initializing full config...");
     full_config_init();
@@ -207,6 +223,24 @@ void initio(){
     }
     initDataBuses();
     initSensors();
+}
+
+uint8_t getFirmwareMajor(){
+    String version = String(BUILD_VERSION);
+    int dotIndex = version.indexOf('.');
+    if (dotIndex > 0) {
+        return version.substring(0, dotIndex).toInt();
+    }
+    return 0;
+}
+
+uint8_t getFirmwareMinor(){
+    String version = String(BUILD_VERSION);
+    int dotIndex = version.indexOf('.');
+    if (dotIndex > 0 && dotIndex < version.length() - 1) {
+        return version.substring(dotIndex + 1).toInt();
+    }
+    return 0;
 }
 
 void initDataBuses(){
@@ -917,6 +951,21 @@ void initDisplay(){
     epd.print("Name: OEPL"+ chipId);
     epd.setCursor(100, 300); 
     epd.print("Epaper driver by Larry Bank https://github.com/bitbank2");
+    epd.setCursor(100, 400); 
+    const char* shaCStr = SHA_STRING;
+    String shaStr = String(shaCStr);
+    // Remove surrounding quotes if present (from stringification when SHA is empty string "")
+    if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
+        shaStr = shaStr.substring(1, shaStr.length() - 1);
+    }
+    if (shaStr.length() == 0 || shaStr == "\"\"" || shaStr == "") {
+        shaStr = "(not set)";
+    }
+    epd.print("Firmware: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()) + " SHA: " + shaStr);
+    if(globalConfig.displays[0].color_scheme == 0){
+        writeSerial("2 color test");
+        epd.fillRect(100,320,10,10,BBEP_BLACK);
+    }
     if(globalConfig.displays[0].color_scheme == 4){
         writeSerial("6 color test");
         epd.fillRect(100,320,10,10,BBEP_RED);
@@ -1079,6 +1128,10 @@ void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len){
             writeSerial("=== Reboot COMMAND (0x000F) ===");
             delay(100);
             reboot();
+            break;
+        case 0x0043: // Firmware Version command
+            writeSerial("=== FIRMWARE VERSION COMMAND (0x0043) ===");
+            handleFirmwareVersion();
             break;
         default:
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
@@ -1951,13 +2004,11 @@ bool decompressImageDataChunked(){
                                 uint8_t invertedFirstPlane = ~firstPlaneByte;
                                 uint16_t planeY = thirdPlaneIndex / (imgWidth / 8);
                                 uint16_t planeX = (thirdPlaneIndex % (imgWidth / 8)) * 8;
-                                
                                 for (int bit = 7; bit >= 0; bit--) {
                                     if (planeY < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && planeX + (7-bit) < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
                                         bool plane1 = (invertedFirstPlane >> bit) & 0x01; // B/W base
                                         bool plane2 = (secondPlaneByte >> bit) & 0x01;   // R/Y
                                         bool plane3 = (byte >> bit) & 0x01;              // G/B
-                                        
                                         // Decode 6 colors: BLACK=000, WHITE=100, RED=110, YELLOW=010, GREEN=101, BLUE=001
                                         if (!plane1 && !plane2 && !plane3) {
                                             epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
@@ -1988,13 +2039,10 @@ bool decompressImageDataChunked(){
             writeSerial("ERROR: uzlib data error");
             break;
         }
-        
     } while (res == TINF_OK && totalDecompressed < originalLength);
     writeSerial("Chunked decompression complete: " + String(totalDecompressed) + " bytes");
     writeSerial("Expected: " + String(originalLength) + " bytes");
     writeSerial("Pixel bytes processed: " + String(pixelBytesProcessed));
-    
-    // Cleanup allocated buffers
     if (firstPlaneBuffer) {
         free(firstPlaneBuffer);
         writeSerial("Freed first plane buffer");
@@ -2252,6 +2300,34 @@ void handleReadConfig(){
     writeSerial("handleReadConfig function completed successfully");
 }
 
+void handleFirmwareVersion(){
+    writeSerial("Building Firmware Version response...");
+    uint8_t major = getFirmwareMajor();
+    uint8_t minor = getFirmwareMinor();
+    const char* shaCStr = SHA_STRING;
+    String shaStr = String(shaCStr);
+    // Remove surrounding quotes if present (from stringification when SHA is empty string "")
+    if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
+        shaStr = shaStr.substring(1, shaStr.length() - 1);
+    }
+    writeSerial("Firmware version: " + String(major) + "." + String(minor));
+    writeSerial("SHA: " + shaStr);
+    uint8_t shaLen = shaStr.length();
+    if (shaLen > 40) shaLen = 40;
+    uint8_t response[2 + 1 + 1 + 1 + 40];
+    uint16_t offset = 0;
+    response[offset++] = 0x00;
+    response[offset++] = 0x43;
+    response[offset++] = major;
+    response[offset++] = minor;
+    response[offset++] = shaLen;
+    for (uint8_t i = 0; i < shaLen && i < 40; i++) {
+        response[offset++] = shaStr.charAt(i);
+    }
+    sendResponse(response, offset);
+    writeSerial("Firmware version response sent");
+}
+
 void handleWriteConfig(uint8_t* data, uint16_t len){
     if (len == 0) {
         writeSerial("ERROR: No config data received");
@@ -2354,6 +2430,11 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len){
 bool loadGlobalConfig(){
     writeSerial("Loading global configuration...");
     memset(&globalConfig, 0, sizeof(globalConfig));
+    // Reset WiFi configuration flag
+    wifiConfigured = false;
+    wifiSsid[0] = '\0';
+    wifiPassword[0] = '\0';
+    wifiEncryptionType = 0;
     static uint8_t configData[MAX_CONFIG_SIZE];
     static uint32_t configLen = MAX_CONFIG_SIZE;
     if (!loadConfig(configData, &configLen)) {
@@ -2494,6 +2575,58 @@ bool loadGlobalConfig(){
                     writeSerial("ERROR: Not enough data for binary_input");
                     globalConfig.loaded = false;
                     return false;
+                }
+                break;
+            case 0x26: // wifi_config
+                {
+                    const uint16_t WIFI_CONFIG_SIZE = 162; // 32 (SSID) + 32 (password) + 1 (encryption) + 95 (reserved)
+                    if (offset + WIFI_CONFIG_SIZE <= configLen) {
+                        // Parse SSID (32 bytes, null-terminated)
+                        memcpy(wifiSsid, &configData[offset], 32);
+                        wifiSsid[32] = '\0'; // Ensure null termination
+                        // Find actual string length (up to first null byte)
+                        uint8_t ssidLen = 0;
+                        while (ssidLen < 32 && wifiSsid[ssidLen] != '\0') ssidLen++;
+                        offset += 32;
+                        
+                        // Parse password (32 bytes, null-terminated)
+                        memcpy(wifiPassword, &configData[offset], 32);
+                        wifiPassword[32] = '\0'; // Ensure null termination
+                        // Find actual string length (up to first null byte)
+                        uint8_t passwordLen = 0;
+                        while (passwordLen < 32 && wifiPassword[passwordLen] != '\0') passwordLen++;
+                        offset += 32;
+                        
+                        // Parse encryption type (1 byte)
+                        wifiEncryptionType = configData[offset++];
+                        
+                        // Skip reserved bytes (95 bytes)
+                        offset += 95;
+                        
+                        // Mark WiFi as configured
+                        wifiConfigured = true;
+                        
+                        // Print WiFi config to console
+                        writeSerial("=== WiFi Configuration Loaded ===");
+                        writeSerial("SSID: \"" + String(wifiSsid) + "\"");
+                        writeSerial("Password: " + String(passwordLen > 0 ? "***" : "(empty)"));
+                        String encTypeStr = "Unknown";
+                        switch(wifiEncryptionType) {
+                            case 0x00: encTypeStr = "None (Open)"; break;
+                            case 0x01: encTypeStr = "WEP"; break;
+                            case 0x02: encTypeStr = "WPA"; break;
+                            case 0x03: encTypeStr = "WPA2"; break;
+                            case 0x04: encTypeStr = "WPA3"; break;
+                        }
+                        writeSerial("Encryption Type: 0x" + String(wifiEncryptionType, HEX) + " (" + encTypeStr + ")");
+                        writeSerial("SSID length: " + String(ssidLen) + " bytes");
+                        writeSerial("Password length: " + String(passwordLen) + " bytes");
+                        writeSerial("WiFi configured: true");
+                    } else {
+                        writeSerial("ERROR: Not enough data for wifi_config");
+                        globalConfig.loaded = false;
+                        return false;
+                    }
                 }
                 break;
             default:
