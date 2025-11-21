@@ -65,20 +65,24 @@ void loop() {
     if (bleActive) {
         delay(10);
     } else {
-        if(globalConfig.power_option.sleep_timeout_ms > 0)
+        if(globalConfig.power_option.sleep_timeout_ms > 0){
             delay(globalConfig.power_option.sleep_timeout_ms);
-        else 
+            updatemsdata();
+        }
+        else{
             delay(2000);
+        }
     }
     #else
-    if(globalConfig.power_option.sleep_timeout_ms > 0)
+    if(globalConfig.power_option.sleep_timeout_ms > 0){
         delay(globalConfig.power_option.sleep_timeout_ms);
-    else 
+        updatemsdata();
+    }
+    else{
         delay(2000);
+    }
     #endif
-    
     writeSerial("Loop end: " + String(millis() / 100));
-    updatemsdata();
 }
 
 void initio(){
@@ -887,7 +891,7 @@ void initDisplay(){
     if (shaStr.length() == 0 || shaStr == "\"\"" || shaStr == "") {
         shaStr = "(not set)";
     }
-    epd.print("Firmware: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()) + " SHA: " + shaStr);
+    epd.print("Firmware: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()));
     if(globalConfig.displays[0].color_scheme == 0){
         writeSerial("2 color test");
         epd.fillRect(100,320,10,10,BBEP_BLACK);
@@ -1482,6 +1486,8 @@ bool decompressImageDataChunked(){
     uzlib_uncompress_init(&d, dictionaryBuffer, window);
     uint16_t displayWidth = epd.width();
     uint16_t displayHeight = epd.height();
+    writeSerial("Display width: " + String(displayWidth));
+    writeSerial("Display height: " + String(displayHeight));
     uint32_t totalDecompressed = 0;
     uint16_t imgWidth = 0, imgHeight = 0;
     uint8_t colorType = 0;
