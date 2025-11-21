@@ -3,14 +3,13 @@
 #include "uzlib.h"
 #include <bb_epaper.h>
 
-// Firmware version - parsed from BUILD_VERSION at compile time
 #ifndef BUILD_VERSION
 #define BUILD_VERSION "0.0"
 #endif
 #ifndef SHA
 #define SHA ""
 #endif
-// Helper macros to properly stringify SHA (handles both quoted and unquoted defines)
+
 #define STRINGIFY(x) #x
 #define XSTRINGIFY(x) STRINGIFY(x)
 #define SHA_STRING XSTRINGIFY(SHA)
@@ -33,36 +32,22 @@ using namespace Adafruit_LittleFS_Namespace;
 #define MAX_DICT_SIZE 32768
 #ifdef TARGET_LARGE_MEMORY
 #define MAX_IMAGE_SIZE (100 * 1024)
-#define MAX_COMPRESSED_SIZE (200 * 1024)  // Allow larger compressed images (only need to store compressed data)
+#define MAX_COMPRESSED_SIZE (200 * 1024)
 #else
 #define MAX_IMAGE_SIZE (50 * 1024)
-#define MAX_COMPRESSED_SIZE (100 * 1024)  // Allow larger compressed images (only need to store compressed data)
+#define MAX_COMPRESSED_SIZE (100 * 1024)
 #endif
-#define MAX_BLOCKS 64  // Increased to support larger compressed images (27+ blocks)
+#define MAX_BLOCKS 64
 #define CONFIG_FILE_PATH "/config.bin"
 #define MAX_CONFIG_SIZE 4096
-
-// Platform-specific constants
-#ifdef TARGET_NRF
-#define ADC_RESOLUTION 12  // nRF52840 has 12-bit ADC
-#ifndef PIN_VBAT
-#define PIN_VBAT PIN_A6  // Virtual pin for battery
-#endif
-#ifndef VBAT_ENABLE
-#define VBAT_ENABLE 27  // nRF pin for VBAT enable
-#endif
-#endif
-
-#ifdef TARGET_ESP32
-#define ADC_RESOLUTION 12  // ESP32-S3 has 12-bit ADC
-// ESP32-specific pin definitions can be added here if needed
-#endif
 
 #ifdef TARGET_NRF
 #include <bluefruit.h>
 extern BLEDfu bledfu;
 extern BLEService imageService;
 extern BLECharacteristic imageCharacteristic;
+// Forward declaration for SoftDevice temperature API
+extern "C" uint32_t sd_temp_get(int32_t *p_temp);
 #endif
 
 #ifdef TARGET_ESP32
@@ -76,6 +61,7 @@ extern BLEServer* pServer;
 extern BLEService* pService;
 extern BLECharacteristic* pTxCharacteristic;
 extern BLECharacteristic* pRxCharacteristic;
+extern BLEAdvertisementData* advertisementData;  // Pointer to global advertisementData object
 #endif
 
 BBEPAPER epd;
@@ -93,8 +79,8 @@ uint8_t decompressionChunk[DECOMP_CHUNK_SIZE];
 uint8_t dictionaryBuffer[MAX_DICT_SIZE];
 uint8_t headerBuffer[6];
 uint8_t bleResponseBuffer[94];
+uint8_t mloopcounter = 0;
 
-// WiFi configuration (from packet 0x26)
 char wifiSsid[33] = {0};  // 32 bytes + null terminator
 char wifiPassword[33] = {0};  // 32 bytes + null terminator
 uint8_t wifiEncryptionType = 0;  // 0x00=none, 0x01=WEP, 0x02=WPA, 0x03=WPA2, 0x04=WPA3
@@ -166,6 +152,8 @@ void printConfigSummary();
 int mapEpd(int id);
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
+float readBatteryVoltage();  // Returns battery voltage in volts, or -1.0 if not configured
+float readChipTemperature();  // Returns chip temperature in degrees Celsius
 
 typedef struct {
     bool active;
@@ -210,3 +198,101 @@ extern struct GlobalConfig globalConfig;
 #define AXP2101_REG_ADC_DATA_SYS_VOL_L 0x39
 #define AXP2101_REG_BAT_PERCENT_DATA 0xA4
 #define AXP2101_REG_PWRON_STATUS 0x20
+
+#ifdef TARGET_NRF
+BLEDfu bledfu;
+BLEService imageService("2446");
+BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
+#endif
+
+#ifdef TARGET_ESP32
+// Define queue sizes and structures first
+#define RESPONSE_QUEUE_SIZE 10
+#define MAX_RESPONSE_SIZE 512
+#define COMMAND_QUEUE_SIZE 5
+#define MAX_COMMAND_SIZE 512
+
+struct ResponseQueueItem {
+    uint8_t data[MAX_RESPONSE_SIZE];
+    uint16_t len;
+    bool pending;
+};
+
+struct CommandQueueItem {
+    uint8_t data[MAX_COMMAND_SIZE];
+    uint16_t len;
+    bool pending;
+};
+
+ResponseQueueItem responseQueue[RESPONSE_QUEUE_SIZE];
+uint8_t responseQueueHead = 0;
+uint8_t responseQueueTail = 0;
+
+CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
+uint8_t commandQueueHead = 0;
+uint8_t commandQueueTail = 0;
+
+class MyBLEServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        writeSerial("=== BLE CLIENT CONNECTED (ESP32) ===");
+        writeSerial("Client connected to ESP32 BLE server");
+        delay(100);  // Give connection time to fully establish
+        writeSerial("Number of connected clients: " + String(pServer->getConnectedCount()));
+    }
+    void onDisconnect(BLEServer* pServer) {
+        writeSerial("=== BLE CLIENT DISCONNECTED (ESP32) ===");
+        writeSerial("Client disconnected from ESP32 BLE server");
+        writeSerial("Number of remaining clients: " + String(pServer->getConnectedCount()));
+        writeSerial("Waiting before restarting advertising...");
+        delay(500);
+        if (pServer->getConnectedCount() == 0) {
+            BLEDevice::startAdvertising();
+            writeSerial("Advertising restarted");
+        } else {
+            writeSerial("Other clients still connected, not restarting advertising");
+        }
+    }
+};
+
+class MyBLECharacteristicCallbacks : public BLECharacteristicCallbacks {
+public:
+    void onWrite(BLECharacteristic* pCharacteristic) {
+        writeSerial("=== BLE WRITE RECEIVED (ESP32) ===");
+        String value = pCharacteristic->getValue();
+        writeSerial("Received data length: " + String(value.length()) + " bytes");
+        if (value.length() > 0 && value.length() <= MAX_COMMAND_SIZE) {
+            uint8_t* data = (uint8_t*)value.c_str();
+            uint16_t len = value.length();
+            // Log first few bytes
+            String hexDump = "Data: ";
+            for (int i = 0; i < len && i < 16; i++) {
+                if (data[i] < 16) hexDump += "0";
+                hexDump += String(data[i], HEX) + " ";
+            }
+            writeSerial(hexDump);
+            uint8_t nextHead = (commandQueueHead + 1) % COMMAND_QUEUE_SIZE;
+            if (nextHead != commandQueueTail) {
+                memcpy(commandQueue[commandQueueHead].data, data, len);
+                commandQueue[commandQueueHead].len = len;
+                commandQueue[commandQueueHead].pending = true;
+                commandQueueHead = nextHead;
+                writeSerial("ESP32: Command queued for processing");
+            } else {
+                writeSerial("ERROR: Command queue full, dropping command");
+            }
+        } else if (value.length() > MAX_COMMAND_SIZE) {
+            writeSerial("WARNING: Command too large, dropping");
+        } else {
+            writeSerial("WARNING: Empty data received");
+        }
+    }
+};
+
+BLEServer* pServer = nullptr;
+BLEService* pService = nullptr;
+BLECharacteristic* pTxCharacteristic = nullptr;
+BLECharacteristic* pRxCharacteristic = nullptr;
+BLEAdvertisementData globalAdvertisementData;  // Global object, not pointer
+BLEAdvertisementData* advertisementData = &globalAdvertisementData;  // Pointer to global object
+MyBLECharacteristicCallbacks* charCallbacks = nullptr;
+#endif

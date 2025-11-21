@@ -1,112 +1,12 @@
 #include "main.h"
 
-#ifdef TARGET_NRF
-BLEDfu bledfu;
-BLEService imageService("2446");
-BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse | BLENotify, 512);
-#endif
-
-#ifdef TARGET_ESP32
-// Define queue sizes and structures first
-#define RESPONSE_QUEUE_SIZE 10
-#define MAX_RESPONSE_SIZE 512
-#define COMMAND_QUEUE_SIZE 5
-#define MAX_COMMAND_SIZE 512
-
-struct ResponseQueueItem {
-    uint8_t data[MAX_RESPONSE_SIZE];
-    uint16_t len;
-    bool pending;
-};
-
-struct CommandQueueItem {
-    uint8_t data[MAX_COMMAND_SIZE];
-    uint16_t len;
-    bool pending;
-};
-
-ResponseQueueItem responseQueue[RESPONSE_QUEUE_SIZE];
-uint8_t responseQueueHead = 0;
-uint8_t responseQueueTail = 0;
-
-CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
-uint8_t commandQueueHead = 0;
-uint8_t commandQueueTail = 0;
-
-class MyBLEServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-        writeSerial("=== BLE CLIENT CONNECTED (ESP32) ===");
-        writeSerial("Client connected to ESP32 BLE server");
-        delay(100);  // Give connection time to fully establish
-        writeSerial("Number of connected clients: " + String(pServer->getConnectedCount()));
-    }
-    void onDisconnect(BLEServer* pServer) {
-        writeSerial("=== BLE CLIENT DISCONNECTED (ESP32) ===");
-        writeSerial("Client disconnected from ESP32 BLE server");
-        writeSerial("Number of remaining clients: " + String(pServer->getConnectedCount()));
-        writeSerial("Waiting before restarting advertising...");
-        delay(500);
-        if (pServer->getConnectedCount() == 0) {
-            BLEDevice::startAdvertising();
-            writeSerial("Advertising restarted");
-        } else {
-            writeSerial("Other clients still connected, not restarting advertising");
-        }
-    }
-};
-
-class MyBLECharacteristicCallbacks : public BLECharacteristicCallbacks {
-public:
-    void onWrite(BLECharacteristic* pCharacteristic) {
-        writeSerial("=== BLE WRITE RECEIVED (ESP32) ===");
-        String value = pCharacteristic->getValue();
-        writeSerial("Received data length: " + String(value.length()) + " bytes");
-        if (value.length() > 0 && value.length() <= MAX_COMMAND_SIZE) {
-            uint8_t* data = (uint8_t*)value.c_str();
-            uint16_t len = value.length();
-            // Log first few bytes
-            String hexDump = "Data: ";
-            for (int i = 0; i < len && i < 16; i++) {
-                if (data[i] < 16) hexDump += "0";
-                hexDump += String(data[i], HEX) + " ";
-            }
-            writeSerial(hexDump);
-            
-            // Queue command for processing in main loop to avoid blocking callback
-            uint8_t nextHead = (commandQueueHead + 1) % COMMAND_QUEUE_SIZE;
-            if (nextHead != commandQueueTail) {
-                memcpy(commandQueue[commandQueueHead].data, data, len);
-                commandQueue[commandQueueHead].len = len;
-                commandQueue[commandQueueHead].pending = true;
-                commandQueueHead = nextHead;
-                writeSerial("ESP32: Command queued for processing");
-            } else {
-                writeSerial("ERROR: Command queue full, dropping command");
-            }
-        } else if (value.length() > MAX_COMMAND_SIZE) {
-            writeSerial("WARNING: Command too large, dropping");
-        } else {
-            writeSerial("WARNING: Empty data received");
-        }
-    }
-};
-
-BLEServer* pServer = nullptr;
-BLEService* pService = nullptr;
-BLECharacteristic* pTxCharacteristic = nullptr;
-BLECharacteristic* pRxCharacteristic = nullptr;
-MyBLECharacteristicCallbacks* charCallbacks = nullptr;
-#endif
-
 void setup() {
     Serial.begin(115200);
-    delay(100);  // Give serial time to initialize
+    delay(100);
     writeSerial("=== FIRMWARE INFO ===");
     writeSerial("Firmware Version: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()));
-    // SHA_STRING is already a string literal from the macro, so we can use it directly
     const char* shaCStr = SHA_STRING;
     String shaStr = String(shaCStr);
-    // Remove surrounding quotes if present (from stringification when SHA is empty string "")
     if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
         shaStr = shaStr.substring(1, shaStr.length() - 1);
     }
@@ -133,7 +33,6 @@ void setup() {
 
 void loop() {
     #ifdef TARGET_ESP32
-    // Process queued commands outside of callback context
     if (commandQueueTail != commandQueueHead) {
         writeSerial("ESP32: Processing queued command (" + String(commandQueue[commandQueueTail].len) + " bytes)");
         imageDataWritten(NULL, NULL, commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
@@ -141,8 +40,6 @@ void loop() {
         commandQueueTail = (commandQueueTail + 1) % COMMAND_QUEUE_SIZE;
         writeSerial("Command processed");
     }
-    
-    // Process queued BLE responses outside of callback context (one per loop for better responsiveness)
     if (responseQueueTail != responseQueueHead && pTxCharacteristic && pServer && pServer->getConnectedCount() > 0) {
         writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
         pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
@@ -153,7 +50,6 @@ void loop() {
         delay(20); // Brief delay to let BLE stack process
     }
     #endif
-    
     if (currentImage.ready) {
         writeSerial("Processing received image...");
         displayReceivedImage();
@@ -161,15 +57,13 @@ void loop() {
         cleanupImageMemory();
         writeSerial("Image processing complete");
     }
-    
     #ifdef TARGET_ESP32
-    // Use shorter delay when BLE transfers are active for faster response
     bool bleActive = (commandQueueTail != commandQueueHead) || 
                      (responseQueueTail != responseQueueHead) ||
                      (pServer && pServer->getConnectedCount() > 0);
     
     if (bleActive) {
-        delay(10); // Fast polling when BLE is active
+        delay(10);
     } else {
         if(globalConfig.power_option.sleep_timeout_ms > 0)
             delay(globalConfig.power_option.sleep_timeout_ms);
@@ -184,6 +78,7 @@ void loop() {
     #endif
     
     writeSerial("Loop end: " + String(millis() / 100));
+    updatemsdata();
 }
 
 void initio(){
@@ -639,10 +534,16 @@ void readAXP2101Data(){
     
     writeSerial("=== AXP2101 Data Read Complete ===");
 }
-//placeholder function for the actual payload 
+
 void updatemsdata(){
-//THIS IS A PLACEHOLDER FOR THE ACTUAL PAYLOAD
-//carefull, the size is limited
+    float batteryVoltage = readBatteryVoltage();
+    float chipTemperature = readChipTemperature();
+    writeSerial("Battery voltage: " + String(batteryVoltage) + "V");
+    writeSerial("Chip temperature: " + String(chipTemperature) + "C");
+    uint8_t chiptemp8 = (uint8_t)chipTemperature;
+    uint16_t batteryVoltageMv = (uint16_t)(batteryVoltage * 1000);
+    uint8_t batterymvvoltage8_high = (uint8_t)(batteryVoltageMv >> 8);
+    uint8_t batterymvvoltage8_low = (uint8_t)(batteryVoltageMv & 0xFF);
 uint8_t msd_payload[13];
 uint16_t msd_cid = 0x2446;
 memset(msd_payload, 0, sizeof(msd_payload));
@@ -654,17 +555,64 @@ msd_payload[5] = 0x6C;
 msd_payload[6] = 0x00;
 msd_payload[7] = 0xC3;
 msd_payload[8] = 0x01;
-msd_payload[9] = 0xB9;
-msd_payload[10] = 0x0B;
-msd_payload[11] = 0x12;
-msd_payload[12] = 0xA6;
+msd_payload[9] = batterymvvoltage8_low;
+msd_payload[10] = batterymvvoltage8_high;
+msd_payload[11] = chiptemp8;
+msd_payload[12] = mloopcounter;
 #ifdef TARGET_NRF
+Bluefruit.Advertising.clearData();
+Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+Bluefruit.Advertising.addName();
 Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_payload, sizeof(msd_payload));
+Bluefruit.Advertising.stop();
+Bluefruit.Advertising.start(0);
 #endif
 #ifdef TARGET_ESP32
-// ESP32 uses BLEAdvertisementData for manufacturer data, currently defined somewhere else
+if (advertisementData != nullptr) {
+        String manufacturerDataStr;
+        manufacturerDataStr.reserve(13);
+        for (int i = 0; i < 13; i++) {
+            manufacturerDataStr += (char)msd_payload[i];
+        }
+        advertisementData->setManufacturerData(manufacturerDataStr);
+        BLEAdvertising *pAdvertising = nullptr;
+        if (pServer != nullptr) {
+            pAdvertising = pServer->getAdvertising();
+        }
+        if (pAdvertising == nullptr) {
+            pAdvertising = BLEDevice::getAdvertising();
+        }
+        if (pAdvertising != nullptr) {
+            pAdvertising->stop();
+            BLEUUID serviceUUID;
+            if (pService != nullptr) {
+                serviceUUID = pService->getUUID();
+            }
+            BLEAdvertisementData freshAdvertisementData;
+            static String savedDeviceName = "";
+            if (savedDeviceName.length() == 0) {
+                savedDeviceName = "OEPL" + getChipIdHex();
+            }
+            freshAdvertisementData.setName(savedDeviceName);
+            freshAdvertisementData.setManufacturerData(manufacturerDataStr);
+            *advertisementData = freshAdvertisementData;
+            pAdvertising->setAdvertisementData(freshAdvertisementData);
+            if (pService != nullptr) {
+                pAdvertising->addServiceUUID(serviceUUID);
+            }
+            pAdvertising->setScanResponse(false);
+            pAdvertising->setMinPreferred(0x06);
+            pAdvertising->setMinPreferred(0x12);
+            pAdvertising->start();
+        } else {
+            writeSerial("ERROR: Failed to get advertising object for update");
+        }
+} else {
+    writeSerial("WARNING: updatemsdata called without advertisementData for ESP32");
+}
 #endif
-writeSerial("MSD data updated");
+mloopcounter++;
+writeSerial("MSD data updated: " + String(mloopcounter));
 }
 
 void full_config_init(){
@@ -766,32 +714,12 @@ void ble_init(){
     }
     pAdvertising->addServiceUUID(serviceUUID);
     writeSerial("Service UUID added to advertising");
-    BLEAdvertisementData advertisementData;
-    advertisementData.setName(deviceName);
+    // Use global advertisementData object (not a local variable)
+    advertisementData->setName(deviceName);
     writeSerial("Device name added to advertising");
-    // Add manufacturer data
-    uint8_t msd_payload[13];
-    uint16_t msd_cid = 0x2446;
-    memset(msd_payload, 0, sizeof(msd_payload));
-    memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
-    msd_payload[2] = 0x02;
-    msd_payload[3] = 0x36;
-    msd_payload[4] = 0x00;
-    msd_payload[5] = 0x6C;
-    msd_payload[6] = 0x00;
-    msd_payload[7] = 0xC3;
-    msd_payload[8] = 0x01;
-    msd_payload[9] = 0xB9;
-    msd_payload[10] = 0x0B;
-    msd_payload[11] = 0x12;
-    msd_payload[12] = 0xA6;
-    String manufacturerDataStr;
-    for (int i = 0; i < 13; i++) {
-        manufacturerDataStr += (char)msd_payload[i];
-    }
-    advertisementData.setManufacturerData(manufacturerDataStr);
-    pAdvertising->setAdvertisementData(advertisementData);
-    writeSerial("Manufacturer data added to advertising");
+    // Add manufacturer data using updatemsdata function
+    updatemsdata();
+    pAdvertising->setAdvertisementData(*advertisementData);
     pAdvertising->setScanResponse(false);
     pAdvertising->setMinPreferred(0x0006);
     pAdvertising->setMinPreferred(0x0012);
@@ -846,7 +774,6 @@ void writeSerial(String message, bool newLine){
 }
 
 int mapEpd(int id){
-    // Map config.yaml panel_ic_type enum values to bb_epaper.h EP_PANEL_* enum values
     switch(id) {
         case 0x0000: return EP_PANEL_UNDEFINED; // ep_panel_undefined
         case 0x0001: return EP42_400x300; // ep42_400x300
@@ -927,7 +854,8 @@ void initDisplay(){
     writeSerial(String("Width: ") + String(epd.width()));
     epd.allocBuffer();
     if(globalConfig.displays[0].color_scheme == 1)epd.allocBuffer(true);
-    // For 4 grayscale mode, use GRAY3 (white) and GRAY0 (black)
+    if(globalConfig.displays[0].color_scheme == 2)epd.allocBuffer(true);
+    if(globalConfig.displays[0].color_scheme == 3)epd.allocBuffer(true);
     if(globalConfig.displays[0].color_scheme == 5){
         epd.fillScreen(BBEP_GRAY3);
         epd.setTextColor(BBEP_GRAY0, BBEP_GRAY3);
@@ -939,7 +867,6 @@ void initDisplay(){
     writeSerial("Chip ID for display: " + chipId);
     if(epd.width() > 500){
     epd.setFont(FONT_12x16);
-    // Use appropriate color constants based on color scheme
     if(globalConfig.displays[0].color_scheme == 5){
         epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_GRAY0);
     } else {
@@ -954,7 +881,6 @@ void initDisplay(){
     epd.setCursor(100, 400); 
     const char* shaCStr = SHA_STRING;
     String shaStr = String(shaCStr);
-    // Remove surrounding quotes if present (from stringification when SHA is empty string "")
     if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
         shaStr = shaStr.substring(1, shaStr.length() - 1);
     }
@@ -995,6 +921,7 @@ void initDisplay(){
     epd.print("Larry Bank");
     epd.setCursor(0, 40); 
     epd.print("github.com/bitbank2");
+    epd.fillRect(100,100,10,10,BBEP_RED);
     }
     writeSerial("Writing plane...");
     epd.writePlane();
@@ -1065,80 +992,6 @@ String getChipIdHex() {
     writeSerial("Using chip ID: " + hexId);
     return hexId;
     #endif
-}
-
-#ifdef TARGET_NRF
-void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len){
-#else
-void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len){
-#endif
-    if (len < 2) {
-        writeSerial("ERROR: Command too short (" + String(len) + " bytes)");
-        return;
-    }
-    uint16_t command = (data[0] << 8) | data[1];  // Fixed byte order
-    writeSerial("Processing command: 0x" + String(command, HEX));
-    switch (command) {
-        case 0x0040: // Read Config command
-            writeSerial("=== READ CONFIG COMMAND (0x0040) ===");
-            writeSerial("Command received at time: " + String(millis()));
-            handleReadConfig();
-            writeSerial("Returned from handleReadConfig");
-            break;
-        case 0x0041: // Write Config command
-            writeSerial("=== WRITE CONFIG COMMAND (0x0041) ===");
-            handleWriteConfig(data + 2, len - 2);
-            break;
-        case 0x0042: // Write Config Chunk command
-            writeSerial("=== WRITE CONFIG CHUNK COMMAND (0x0042) ===");
-            handleWriteConfigChunk(data + 2, len - 2);
-            break;
-        case 0x0011: // Read Dynamic Config command (legacy)
-            writeSerial("=== READ DYNAMIC CONFIG COMMAND (0x0011) ===");
-            handleReadDynamicConfig();
-            break;
-        case 0x0064: // Image info command
-            writeSerial("=== IMAGE INFO COMMAND (0x0064) ===");
-            handleImageInfo(data + 2, len - 2);
-            break;
-        case 0x0065: // Block data command
-            handleBlockData(data + 2, len - 2);
-            break;
-        case 0x0002: // Start sending packets for current block
-            writeSerial("=== START PACKETS COMMAND (0x0002) ===");
-            writeSerial("Web tool ready to send packets for block " + String(currentImage.currentBlock));
-            break;
-        case 0x0003: // Finalization command
-            {
-                writeSerial("=== FINALIZATION COMMAND (0x0003) ===");
-                writeSerial("Image transfer finalized");
-                if (currentImage.data && currentImage.received > 0) {
-                    currentImage.ready = true;
-                    writeSerial("Image marked as ready for display");
-                }
-                uint8_t ackResponse[] = {0x63, 0x00};
-                sendResponse(ackResponse, sizeof(ackResponse));
-            }
-            break;
-        case 0x0005: // Display info command
-            writeSerial("=== DISPLAY INFO COMMAND (0x0005) ===");
-            handleDisplayInfo();
-            break;
-        case 0x000F: // Reboot
-            writeSerial("=== Reboot COMMAND (0x000F) ===");
-            delay(100);
-            reboot();
-            break;
-        case 0x0043: // Firmware Version command
-            writeSerial("=== FIRMWARE VERSION COMMAND (0x0043) ===");
-            handleFirmwareVersion();
-            break;
-        default:
-            writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
-            writeSerial("Expected: 0x0011 (read config), 0x0064 (image info), 0x0065 (block data), or 0x0003 (finalize)");
-            break;
-    }
-    writeSerial("Command processing completed successfully");
 }
 
 void reboot(){
@@ -1485,21 +1338,17 @@ void drawImageData() {
         uint32_t planeSize = currentImage.size / 3; // Each plane is 1/3 of total size
         uint32_t redPlaneOffset = planeSize; // Second plane (R/Y)
         uint32_t greenPlaneOffset = planeSize * 2; // Third plane (G/B)
-        
         for (uint16_t y = 0; y < displayWidth; y++) {
             for (uint16_t x = 0; x < displayHeight; x++) {
                 if (pixelIndex >= planeSize) break;
                 uint8_t pixelByte = ~currentImage.data[pixelIndex]; // First plane (B/W) is inverted
                 uint8_t redByte = currentImage.data[pixelIndex + redPlaneOffset]; // Second plane (R/Y)
                 uint8_t greenByte = currentImage.data[pixelIndex + greenPlaneOffset]; // Third plane (G/B)
-                
                 for (int bit = 7; bit >= 0; bit--) {
                     if (x >= displayHeight) break;
-                    
                     bool plane1 = (pixelByte >> bit) & 0x01; // B/W base
                     bool plane2 = (redByte >> bit) & 0x01;   // R/Y
                     bool plane3 = (greenByte >> bit) & 0x01;  // G/B
-                    
                     // Decode 6 colors: BLACK=000, WHITE=100, RED=110, YELLOW=010, GREEN=101, BLUE=001
                     if (!plane1 && !plane2 && !plane3) {
                         epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
@@ -1530,13 +1379,11 @@ void drawImageData() {
         uint16_t imgWidth = currentImage.width;
         uint16_t imgHeight = currentImage.height;
         uint16_t bytesPerRow = (imgWidth + 3) / 4; // Round up to handle width not divisible by 4
-        
         for (uint16_t y = 0; y < displayWidth && y < imgHeight; y++) {
             for (uint16_t byteInRow = 0; byteInRow < bytesPerRow; byteInRow++) {
                 if (pixelIndex >= currentImage.size) break;
                 uint8_t pixelByte = currentImage.data[pixelIndex];
                 uint16_t xStart = byteInRow * 4;
-                
                 // 4 grayscale: 2 bits per pixel, 4 pixels per byte
                 // Encoding: 00=Black (GRAY0), 01=DarkGray (GRAY1), 10=LightGray (GRAY2), 11=White (GRAY3)
                 for (int pixel = 0; pixel < 4; pixel++) {
@@ -1571,211 +1418,6 @@ void drawImageData() {
         writeSerial("ERROR: Unsupported image type: 0x" + String(currentImage.dataType, HEX));
     }
     writeSerial("Image drawing complete.");
-}
-//legacy function
-void handleReadDynamicConfig(){
-    writeSerial("Handling Read Dynamic Config request...");
-    uint8_t responseBuffer[94];
-    uint16_t responseLen = 0;
-    responseBuffer[responseLen++] = 0x00;
-    responseBuffer[responseLen++] = 0xCD;
-    uint16_t configLen = 0;
-    buildDynamicConfigResponse(responseBuffer + 2, &configLen);
-    responseLen += configLen;
-    if (responseLen > 2) {
-        writeSerial("Sending Dynamic Config response (" + String(responseLen) + " bytes)...");
-        String hexDump = "Complete response (" + String(responseLen) + " bytes): ";
-        for (uint16_t i = 0; i < responseLen; i++) {
-            if (responseBuffer[i] < 0x10) hexDump += "0";
-            hexDump += String(responseBuffer[i], HEX);
-        }
-        writeSerial(hexDump);
-        sendResponse(responseBuffer, responseLen);
-        writeSerial("Dynamic Config response sent successfully");
-    } else {
-        writeSerial("ERROR: Failed to build Dynamic Config response");
-    }
-}
-//legacy function
-void handleDisplayInfo(){
-    writeSerial("Building Display Info response...");
-    uint8_t response[33];
-    uint16_t offset = 0;
-    response[offset++] = 0x00;
-    response[offset++] = 0x05;
-    for (int i = 0; i < 31; i++) {
-        response[offset++] = 0x00;
-    }
-    offset = 2;
-    for (int i = 0; i < 18; i++) {
-        response[offset++] = 0x00;
-    }
-    response[offset++] = 0x00; 
-    response[offset++] = 0x00;
-    response[offset++] = 0x00;
-    response[offset++] = 0x00;
-    // Offset 22-23: Width (uint16, little-endian)
-    uint16_t width = epd.width();
-    response[offset++] = width & 0xFF;
-    response[offset++] = (width >> 8) & 0xFF;
-    // Offset 24-25: Height (uint16, little-endian)  
-    uint16_t height = epd.height();
-    response[offset++] = height & 0xFF;
-    response[offset++] = (height >> 8) & 0xFF;
-    // Offset 26-29: Reserved
-    for (int i = 0; i < 4; i++) {
-        response[offset++] = 0x00;
-    }
-    // Offset 30: Color scheme (0=bw, 1=bwr, 2=bwy, 3=bwry, 4=bwgbry, 5=bw4)
-    // Send actual color_scheme value
-    response[offset++] = globalConfig.displays[0].color_scheme & 0xFF;
-    
-    writeSerial("Display Info - Width: " + String(width) + ", Height: " + String(height) + ", Colors: " + String(globalConfig.displays[0].color_scheme));
-    // Send the response
-    sendResponse(response, sizeof(response));
-    writeSerial("Display info response sent");
-}
-//legacy function
-void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len) {
-    writeSerial("Building Dynamic Config response...");
-    uint16_t offset = 0;
-    buffer[offset++] = 0x20;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x36;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x01; // Basic display functions
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // Not inversed
-    buffer[offset++] = 0x00; // Not inversed
-    buffer[offset++] = 0x00;
-    uint16_t screenHeight = epd.width();
-    buffer[offset++] = screenHeight & 0xFF;
-    buffer[offset++] = (screenHeight >> 8) & 0xFF;
-    uint16_t screenWidth = epd.height();
-    buffer[offset++] = screenWidth & 0xFF; 
-    buffer[offset++] = (screenWidth >> 8) & 0xFF;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // Send actual color_scheme value (0-5) instead of simplified color count
-    buffer[offset++] = globalConfig.displays[0].color_scheme & 0xFF;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // EPD Pinout Enabled (4 bytes)
-    buffer[offset++] = 0x01; // Enabled
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // LED Pinout Enabled (4 bytes)
-    buffer[offset++] = 0x00; // Disabled
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // NFC Pinout Enabled (4 bytes)
-    buffer[offset++] = 0x00; // Disabled
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // Flash Pinout Enabled (4 bytes)
-    buffer[offset++] = 0x00; // Disabled
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // ADC Pinout (2 bytes)
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // UART Pinout (2 bytes)
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // EPD Pinout (26 bytes) - Your current pin configuration
-    // Reset pin (D0)
-    buffer[offset++] = 0x00; // D0 = 0
-    buffer[offset++] = 0x00;
-    // DC pin (D3)
-    buffer[offset++] = 0x03; // D3 = 3
-    buffer[offset++] = 0x00;
-    // BUSY pin (D5)
-    buffer[offset++] = 0x05; // D5 = 5
-    buffer[offset++] = 0x00;
-    // BUSY secondary pin (2 bytes) - not used
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // CS pin (D1)
-    buffer[offset++] = 0x01; // D1 = 1
-    buffer[offset++] = 0x00;
-    // CS secondary pin (2 bytes) - not used
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // CLK pin (D8)
-    buffer[offset++] = 0x08; // D8 = 8
-    buffer[offset++] = 0x00;
-    // MOSI pin (D10)
-    buffer[offset++] = 0x0A; // D10 = 10
-    buffer[offset++] = 0x00;
-    // Enable pin (2 bytes) - not used
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // Enable1 pin (2 bytes) - not used
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // Enable Invert (1 byte)
-    buffer[offset++] = 0x00; // Not inverted
-    // Flash CS pin (2 bytes) - not used
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00;
-    // Pin Config Sleep (1 byte)
-    buffer[offset++] = 0x00;
-    // Pin Enable (1 byte)
-    buffer[offset++] = 0x00;
-    // Pin Enable Sleep (1 byte)
-    buffer[offset++] = 0x00;
-    // LED Pinout (7 bytes) - all disabled
-    buffer[offset++] = 0x00; // R pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // G pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // B pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // Inverted
-    // NFC Pinout (8 bytes) - all disabled
-    buffer[offset++] = 0x00; // SDA pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // SCL pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // CS pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // IRQ pin
-    buffer[offset++] = 0x00;
-    // Flash Pinout (8 bytes) - all disabled
-    buffer[offset++] = 0x00; // CS pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // CLK pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // MISO pin
-    buffer[offset++] = 0x00;
-    buffer[offset++] = 0x00; // MOSI pin
-    buffer[offset++] = 0x00;
-    *len = offset;
-    writeSerial("Dynamic Config response built successfully (" + String(offset) + " bytes)");
-    // Debug: Print first few bytes of config data
-    String configDump = "Config data: ";
-    for (uint16_t i = 0; i < (offset < 16 ? offset : 16); i++) {
-        if (buffer[i] < 0x10) configDump += "0";
-        configDump += String(buffer[i], HEX);
-    }
-    if (offset > 16) configDump += "...";
-    writeSerial(configDump);
-    // Debug: Print complete config data
-    String fullConfigDump = "Full config data (" + String(offset) + " bytes): ";
-    for (uint16_t i = 0; i < offset; i++) {
-        if (buffer[i] < 0x10) fullConfigDump += "0";
-        fullConfigDump += String(buffer[i], HEX);
-    }
-    writeSerial(fullConfigDump);
 }
 
 void cleanupImageMemory() {
@@ -1880,7 +1522,6 @@ bool decompressImageDataChunked(){
                         uint16_t drawWidth = (imgWidth < displayWidth) ? imgWidth : displayWidth;
                         uint16_t drawHeight = (imgHeight < displayHeight) ? imgHeight : displayHeight;
                         writeSerial("Drawing bounds: " + String(drawWidth) + "x" + String(drawHeight));
-                        
                         // Allocate buffer for colored image first plane
                         if (colorType == 2 || colorType == 3) {
                             firstPlaneSize = (imgWidth * imgHeight) / 8;
@@ -1983,7 +1624,6 @@ bool decompressImageDataChunked(){
                         uint32_t planeSize = firstPlaneSize;
                         uint32_t redPlaneOffset = planeSize;
                         uint32_t greenPlaneOffset = planeSize * 2;
-                        
                         if (pixelByteIndex < redPlaneOffset) {
                             // First plane (inverted B/W data) - store in buffer
                             if (pixelByteIndex < firstPlaneSize) {
@@ -2306,7 +1946,6 @@ void handleFirmwareVersion(){
     uint8_t minor = getFirmwareMinor();
     const char* shaCStr = SHA_STRING;
     String shaStr = String(shaCStr);
-    // Remove surrounding quotes if present (from stringification when SHA is empty string "")
     if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
         shaStr = shaStr.substring(1, shaStr.length() - 1);
     }
@@ -2430,7 +2069,6 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len){
 bool loadGlobalConfig(){
     writeSerial("Loading global configuration...");
     memset(&globalConfig, 0, sizeof(globalConfig));
-    // Reset WiFi configuration flag
     wifiConfigured = false;
     wifiSsid[0] = '\0';
     wifiPassword[0] = '\0';
@@ -2448,10 +2086,8 @@ bool loadGlobalConfig(){
         return false;
     }
     uint32_t offset = 0;
-    // Read length (2 bytes, little endian)
     uint16_t packetLength = configData[offset] | (configData[offset + 1] << 8);
     offset += 2;
-    // Read version (1 byte)
     globalConfig.version = configData[offset++];
     globalConfig.minor_version = 0; // Not stored in current format
     writeSerial("Config version: " + String(globalConfig.version));
@@ -2460,7 +2096,6 @@ bool loadGlobalConfig(){
                ", ManufacturerData: " + String(sizeof(struct ManufacturerData)) + 
                ", PowerOption: " + String(sizeof(struct PowerOption)) + 
                ", DisplayConfig: " + String(sizeof(struct DisplayConfig)));
-    // Parse individual packets
     while (offset < configLen - 2) { // -2 for CRC
         if (offset + 2 > configLen - 2) break;
         uint8_t packetNumber = configData[offset++];
@@ -2579,34 +2214,21 @@ bool loadGlobalConfig(){
                 break;
             case 0x26: // wifi_config
                 {
-                    const uint16_t WIFI_CONFIG_SIZE = 162; // 32 (SSID) + 32 (password) + 1 (encryption) + 95 (reserved)
+                    const uint16_t WIFI_CONFIG_SIZE = 162;
                     if (offset + WIFI_CONFIG_SIZE <= configLen) {
-                        // Parse SSID (32 bytes, null-terminated)
                         memcpy(wifiSsid, &configData[offset], 32);
-                        wifiSsid[32] = '\0'; // Ensure null termination
-                        // Find actual string length (up to first null byte)
+                        wifiSsid[32] = '\0';
                         uint8_t ssidLen = 0;
                         while (ssidLen < 32 && wifiSsid[ssidLen] != '\0') ssidLen++;
                         offset += 32;
-                        
-                        // Parse password (32 bytes, null-terminated)
                         memcpy(wifiPassword, &configData[offset], 32);
-                        wifiPassword[32] = '\0'; // Ensure null termination
-                        // Find actual string length (up to first null byte)
+                        wifiPassword[32] = '\0';
                         uint8_t passwordLen = 0;
                         while (passwordLen < 32 && wifiPassword[passwordLen] != '\0') passwordLen++;
                         offset += 32;
-                        
-                        // Parse encryption type (1 byte)
                         wifiEncryptionType = configData[offset++];
-                        
-                        // Skip reserved bytes (95 bytes)
                         offset += 95;
-                        
-                        // Mark WiFi as configured
                         wifiConfigured = true;
-                        
-                        // Print WiFi config to console
                         writeSerial("=== WiFi Configuration Loaded ===");
                         writeSerial("SSID: \"" + String(wifiSsid) + "\"");
                         writeSerial("Password: " + String(passwordLen > 0 ? "***" : "(empty)"));
@@ -2778,4 +2400,116 @@ void printConfigSummary(){
         writeSerial("");
     }
     writeSerial("=============================");
+}
+
+float readBatteryVoltage() {
+    if (globalConfig.power_option.battery_sense_pin == 0xFF) {
+        return -1.0;
+    }
+    uint8_t sensePin = globalConfig.power_option.battery_sense_pin;
+    uint8_t enablePin = globalConfig.power_option.battery_sense_enable_pin;
+    uint16_t scalingFactor = globalConfig.power_option.voltage_scaling_factor;
+    pinMode(sensePin, INPUT);
+    if (enablePin != 0xFF) {
+        pinMode(enablePin, OUTPUT);
+        digitalWrite(enablePin, HIGH);
+        delay(10);
+    }
+    const int numSamples = 10;
+    uint32_t adcSum = 0;
+    for (int i = 0; i < numSamples; i++) {
+        adcSum += analogRead(sensePin);
+        delay(2);
+    }
+    uint32_t adcAverage = adcSum / numSamples;
+    if (enablePin != 0xFF) {
+        digitalWrite(enablePin, LOW);
+    }
+    float voltage = -1.0;
+    if (scalingFactor > 0) {
+        voltage = (adcAverage * scalingFactor) / (100000.0);
+    }
+     return voltage;
+}
+
+float readChipTemperature() {
+    #ifdef TARGET_ESP32
+    float temp = temperatureRead();
+    return temp; 
+    #elif defined(TARGET_NRF)
+    int32_t tempRaw = 0;
+    uint32_t err_code = sd_temp_get(&tempRaw);
+    if (err_code == 0) {
+        float tempC = tempRaw * 0.25;
+        return tempC;
+    }
+    #else
+    return -999.0;
+    #endif
+}
+
+#ifdef TARGET_NRF
+void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len){
+#else
+void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len){
+#endif
+    if (len < 2) {
+        writeSerial("ERROR: Command too short (" + String(len) + " bytes)");
+        return;
+    }
+    uint16_t command = (data[0] << 8) | data[1];  // Fixed byte order
+    writeSerial("Processing command: 0x" + String(command, HEX));
+    switch (command) {
+        case 0x0040: // Read Config command
+            writeSerial("=== READ CONFIG COMMAND (0x0040) ===");
+            writeSerial("Command received at time: " + String(millis()));
+            handleReadConfig();
+            writeSerial("Returned from handleReadConfig");
+            break;
+        case 0x0041: // Write Config command
+            writeSerial("=== WRITE CONFIG COMMAND (0x0041) ===");
+            handleWriteConfig(data + 2, len - 2);
+            break;
+        case 0x0042: // Write Config Chunk command
+            writeSerial("=== WRITE CONFIG CHUNK COMMAND (0x0042) ===");
+            handleWriteConfigChunk(data + 2, len - 2);
+            break;
+        case 0x0064: // Image info command
+            writeSerial("=== IMAGE INFO COMMAND (0x0064) ===");
+            handleImageInfo(data + 2, len - 2);
+            break;
+        case 0x0065: // Block data command
+            handleBlockData(data + 2, len - 2);
+            break;
+        case 0x0002: // Start sending packets for current block
+            writeSerial("=== START PACKETS COMMAND (0x0002) ===");
+            writeSerial("Web tool ready to send packets for block " + String(currentImage.currentBlock));
+            break;
+        case 0x0003: // Finalization command
+            {
+                writeSerial("=== FINALIZATION COMMAND (0x0003) ===");
+                writeSerial("Image transfer finalized");
+                if (currentImage.data && currentImage.received > 0) {
+                    currentImage.ready = true;
+                    writeSerial("Image marked as ready for display");
+                }
+                uint8_t ackResponse[] = {0x63, 0x00};
+                sendResponse(ackResponse, sizeof(ackResponse));
+            }
+            break;
+        case 0x000F: // Reboot
+            writeSerial("=== Reboot COMMAND (0x000F) ===");
+            delay(100);
+            reboot();
+            break;
+        case 0x0043: // Firmware Version command
+            writeSerial("=== FIRMWARE VERSION COMMAND (0x0043) ===");
+            handleFirmwareVersion();
+            break;
+        default:
+            writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
+            writeSerial("Expected: 0x0011 (read config), 0x0064 (image info), 0x0065 (block data), or 0x0003 (finalize)");
+            break;
+    }
+    writeSerial("Command processing completed successfully");
 }
