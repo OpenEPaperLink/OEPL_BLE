@@ -29,6 +29,9 @@ void setup() {
     initDisplay();
     writeSerial("Display initialized");
     writeSerial("=== Setup completed successfully ===");
+    #ifdef TARGET_NRF
+    updatemsdata();
+    #endif
 }
 
 void loop() {
@@ -50,13 +53,7 @@ void loop() {
         delay(20); // Brief delay to let BLE stack process
     }
     #endif
-    if (currentImage.ready) {
-        writeSerial("Processing received image...");
-        displayReceivedImage();
-        currentImage.ready = false;
-        cleanupImageMemory();
-        writeSerial("Image processing complete");
-    }
+    checkimage();
     #ifdef TARGET_ESP32
     bool bleActive = (commandQueueTail != commandQueueHead) || 
                      (responseQueueTail != responseQueueHead) ||
@@ -67,7 +64,8 @@ void loop() {
     } else {
         if(globalConfig.power_option.sleep_timeout_ms > 0){
             delay(globalConfig.power_option.sleep_timeout_ms);
-            updatemsdata();
+            //a bit unstable, removing it for now
+            //updatemsdata();
         }
         else{
             delay(2000);
@@ -75,14 +73,34 @@ void loop() {
     }
     #else
     if(globalConfig.power_option.sleep_timeout_ms > 0){
-        delay(globalConfig.power_option.sleep_timeout_ms);
+        uint32_t remainingDelay = globalConfig.power_option.sleep_timeout_ms;
+        const uint32_t CHECK_INTERVAL_MS = 100;
+        while(remainingDelay > 0){
+            uint32_t chunkDelay = (remainingDelay > CHECK_INTERVAL_MS) ? CHECK_INTERVAL_MS : remainingDelay;
+            delay(chunkDelay);
+            remainingDelay -= chunkDelay;
+            checkimage();
+            //sd_app_evt_wait();
+        }
         updatemsdata();
     }
     else{
-        delay(2000);
+        delay(500);
+        checkimage();
     }
     #endif
     writeSerial("Loop end: " + String(millis() / 100));
+}
+
+void checkimage(){
+    if (currentImage.ready) {
+        writeSerial("Processing received image...");
+        displayReceivedImage();
+        currentImage.ready = false;
+        cleanupImageMemory();
+        writeSerial("Image processing complete");
+    }
+
 }
 
 void initio(){
@@ -136,7 +154,7 @@ uint8_t getFirmwareMajor(){
 uint8_t getFirmwareMinor(){
     String version = String(BUILD_VERSION);
     int dotIndex = version.indexOf('.');
-    if (dotIndex > 0 && dotIndex < version.length() - 1) {
+    if (dotIndex > 0 && dotIndex < (int)(version.length() - 1)) {
         return version.substring(dotIndex + 1).toInt();
     }
     return 0;
@@ -568,6 +586,8 @@ Bluefruit.Advertising.clearData();
 Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
 Bluefruit.Advertising.addName();
 Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_payload, sizeof(msd_payload));
+Bluefruit.Advertising.setInterval(32, 400);
+Bluefruit.Advertising.setFastTimeout(1);
 Bluefruit.Advertising.stop();
 Bluefruit.Advertising.start(0);
 #endif
@@ -639,6 +659,7 @@ void ble_init(){
     #ifdef TARGET_NRF
     Bluefruit.configCentralBandwidth(BANDWIDTH_MAX);
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+    Bluefruit.autoConnLed(false);
     Bluefruit.setTxPower(globalConfig.power_option.tx_power);
     Bluefruit.begin(1, 0);
     bledfu.begin();
@@ -658,8 +679,8 @@ void ble_init(){
     Bluefruit.setName(deviceName.c_str());
     writeSerial("Device name set to: " + deviceName);
     writeSerial("Configuring power management...");
-    sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
     sd_power_mode_set(NRF_POWER_MODE_LOWPWR);
+    sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
     writeSerial("Power management configured");
     writeSerial("Configuring BLE advertising...");
     Bluefruit.Advertising.clearData();
@@ -758,6 +779,15 @@ void pwrmgm(bool onoff){
         delay(200);
     }
     else{
+        SPI.end();
+        Wire.end();
+        //Serial.end();
+        //delay(50);
+        //NRF_USBD->ENABLE = 0;
+        //NRF_POWER->USBREGSTATUS;
+        //NRF_SAADC->TASKS_STOP = 1;
+        //NRF_SAADC->ENABLE = 0;
+
         pinMode(globalConfig.displays[0].reset_pin, INPUT);
         pinMode(globalConfig.displays[0].cs_pin, INPUT);
         pinMode(globalConfig.displays[0].dc_pin, INPUT);
@@ -851,38 +881,54 @@ void initDisplay(){
     writeSerial("=== Initializing Display ===");
     if(globalConfig.display_count > 0){
     pwrmgm(true);
-    epd = BBEPAPER(mapEpd(globalConfig.displays[0].panel_ic_type));
-    epd.setRotation(globalConfig.displays[0].rotation * 90);
-    epd.initIO(globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin);
-    writeSerial(String("Height: ") + String(epd.height()));
-    writeSerial(String("Width: ") + String(epd.width()));
-    epd.allocBuffer();
-    if(globalConfig.displays[0].color_scheme == 1)epd.allocBuffer(true);
-    if(globalConfig.displays[0].color_scheme == 2)epd.allocBuffer(true);
-    if(globalConfig.displays[0].color_scheme == 3)epd.allocBuffer(true);
+    memset(&bbep, 0, sizeof(BBEPDISP));
+    int panelType = mapEpd(globalConfig.displays[0].panel_ic_type);
+    bbepSetPanelType(&bbep, panelType);
+    bbepSetRotation(&bbep, globalConfig.displays[0].rotation * 90);
+    bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
+    writeSerial(String("Height: ") + String(bbep.height));
+    writeSerial(String("Width: ") + String(bbep.width));
+    if(globalConfig.displays[0].transmission_modes & 0x08){ // Bit 3: direct_write mode
+    bbepWakeUp(&bbep);
+    bbepSendCMDSequence(&bbep, bbep.pInitFull);
+    String chipId = getChipIdHex();
+    String infoText = "openepaperlink.org\nName: OEPL" + chipId + "\nEpaper driver by\nLarry Bank\ngithub.com/bitbank2";
+    writeTextAndFill(infoText.c_str());
+    bbepRefresh(&bbep, REFRESH_FULL);
+    waitforrefresh(60);
+    return;
+    }
+    //legacy, will be removed long term
+    bbepAllocBuffer(&bbep, 0);
+    if(globalConfig.displays[0].color_scheme == 1)bbepAllocBuffer(&bbep, 1);
+    if(globalConfig.displays[0].color_scheme == 2)bbepAllocBuffer(&bbep, 1);
+    if(globalConfig.displays[0].color_scheme == 3)bbepAllocBuffer(&bbep, 1);
     if(globalConfig.displays[0].color_scheme == 5){
-        epd.fillScreen(BBEP_GRAY3);
-        epd.setTextColor(BBEP_GRAY0, BBEP_GRAY3);
+        bbepFill(&bbep, BBEP_GRAY3, PLANE_BOTH);
+        bbep.iFG = BBEP_GRAY0;
+        bbep.iBG = BBEP_GRAY3;
     } else {
-        epd.fillScreen(BBEP_WHITE);
-        epd.setTextColor(BBEP_BLACK, BBEP_WHITE);
+        bbepFill(&bbep, BBEP_WHITE, PLANE_BOTH);
+        bbep.iFG = BBEP_BLACK;
+        bbep.iBG = BBEP_WHITE;
     }
     String chipId = getChipIdHex();
     writeSerial("Chip ID for display: " + chipId);
-    if(epd.width() > 500){
-    epd.setFont(FONT_12x16);
+    if(bbep.width > 500){
+    bbep.iFont = FONT_12x16;
     if(globalConfig.displays[0].color_scheme == 5){
-        epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_GRAY0);
+        bbepDrawSprite(&bbep, epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_GRAY0);
     } else {
-        epd.drawSprite(epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_BLACK);
+        bbepDrawSprite(&bbep, epd_bitmap_logo, 152, 152, 19, 600, 22, BBEP_BLACK);
     }
-    epd.setCursor(100, 100); 
-    epd.print("openepaperlink.org");
-    epd.setCursor(100, 200); 
-    epd.print("Name: OEPL"+ chipId);
-    epd.setCursor(100, 300); 
-    epd.print("Epaper driver by Larry Bank https://github.com/bitbank2");
-    epd.setCursor(100, 400); 
+    bbepSetCursor(&bbep, 100, 100);
+    bbepWriteString(&bbep, -1, -1, (char*)"openepaperlink.org", bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 100, 200);
+    String nameStr = "Name: OEPL" + chipId;
+    bbepWriteString(&bbep, -1, -1, (char*)nameStr.c_str(), bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 100, 300);
+    bbepWriteString(&bbep, -1, -1, (char*)"Epaper driver by Larry Bank https://github.com/bitbank2", bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 100, 400);
     const char* shaCStr = SHA_STRING;
     String shaStr = String(shaCStr);
     if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
@@ -891,50 +937,52 @@ void initDisplay(){
     if (shaStr.length() == 0 || shaStr == "\"\"" || shaStr == "") {
         shaStr = "(not set)";
     }
-    epd.print("Firmware: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()));
+    String firmwareStr = "Firmware: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor());
+    bbepWriteString(&bbep, -1, -1, (char*)firmwareStr.c_str(), bbep.iFont, bbep.iFG, bbep.iBG);
     if(globalConfig.displays[0].color_scheme == 0){
         writeSerial("2 color test");
-        epd.fillRect(100,320,10,10,BBEP_BLACK);
+        bbepRectangle(&bbep, 100, 320, 100+10-1, 320+10-1, BBEP_BLACK, 1);
     }
     if(globalConfig.displays[0].color_scheme == 4){
         writeSerial("6 color test");
-        epd.fillRect(100,320,10,10,BBEP_RED);
-        epd.fillRect(110,320,10,10,BBEP_GREEN);
-        epd.fillRect(120,320,10,10,BBEP_BLUE);
-        epd.fillRect(130,320,10,10,BBEP_YELLOW);
-        epd.fillRect(140,320,10,10,BBEP_BLACK);
-        epd.fillRect(150,320,10,10,BBEP_WHITE);
+        bbepRectangle(&bbep, 100, 320, 100+10-1, 320+10-1, BBEP_RED, 1);
+        bbepRectangle(&bbep, 110, 320, 110+10-1, 320+10-1, BBEP_GREEN, 1);
+        bbepRectangle(&bbep, 120, 320, 120+10-1, 320+10-1, BBEP_BLUE, 1);
+        bbepRectangle(&bbep, 130, 320, 130+10-1, 320+10-1, BBEP_YELLOW, 1);
+        bbepRectangle(&bbep, 140, 320, 140+10-1, 320+10-1, BBEP_BLACK, 1);
+        bbepRectangle(&bbep, 150, 320, 150+10-1, 320+10-1, BBEP_WHITE, 1);
     }
     if(globalConfig.displays[0].color_scheme == 5){
         writeSerial("4 grayscale test");
-        epd.fillRect(100,320,10,10,BBEP_GRAY0);
-        epd.fillRect(110,320,10,10,BBEP_GRAY1);
-        epd.fillRect(120,320,10,10,BBEP_GRAY2);
-        epd.fillRect(130,320,10,10,BBEP_GRAY3);
+        bbepRectangle(&bbep, 100, 320, 100+10-1, 320+10-1, BBEP_GRAY0, 1);
+        bbepRectangle(&bbep, 110, 320, 110+10-1, 320+10-1, BBEP_GRAY1, 1);
+        bbepRectangle(&bbep, 120, 320, 120+10-1, 320+10-1, BBEP_GRAY2, 1);
+        bbepRectangle(&bbep, 130, 320, 130+10-1, 320+10-1, BBEP_GRAY3, 1);
     }
     }
     else{
-    epd.setFont(FONT_6x8);
-    epd.setCursor(0, 0); 
-    epd.print("openepaperlink.org");
-    epd.setCursor(0, 10); 
-    epd.print("Name: OEPL"+ chipId);
-    epd.setCursor(0, 20); 
-    epd.print("Epaper driver by");
-    epd.setCursor(0, 30); 
-    epd.print("Larry Bank");
-    epd.setCursor(0, 40); 
-    epd.print("github.com/bitbank2");
-    epd.fillRect(100,100,10,10,BBEP_RED);
+    bbep.iFont = FONT_6x8;
+    bbepSetCursor(&bbep, 0, 0);
+    bbepWriteString(&bbep, -1, -1, (char*)"openepaperlink.org", bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 0, 10);
+    String nameStr2 = "Name: OEPL" + chipId;
+    bbepWriteString(&bbep, -1, -1, (char*)nameStr2.c_str(), bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 0, 20);
+    bbepWriteString(&bbep, -1, -1, (char*)"Epaper driver by", bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 0, 30);
+    bbepWriteString(&bbep, -1, -1, (char*)"Larry Bank", bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepSetCursor(&bbep, 0, 40);
+    bbepWriteString(&bbep, -1, -1, (char*)"github.com/bitbank2", bbep.iFont, bbep.iFG, bbep.iBG);
+    bbepRectangle(&bbep, 100, 100, 100+10-1, 100+10-1, BBEP_RED, 1);
     }
     writeSerial("Writing plane...");
-    epd.writePlane();
+    bbepWritePlane(&bbep, PLANE_BOTH, false);
     writeSerial("Refreshing display...");
-    epd.refresh(REFRESH_FULL, false);
+    bbepRefresh(&bbep, REFRESH_FULL);
     waitforrefresh(60);
     uint16_t newrotation = globalConfig.displays[0].rotation * 90 + 270;
     if(newrotation >= 360)newrotation = newrotation - 360;
-    epd.setRotation(newrotation);    
+    bbepSetRotation(&bbep, newrotation);    
     pwrmgm(false);
     }
     else{
@@ -943,10 +991,10 @@ void initDisplay(){
 }
 
 bool waitforrefresh(int timeout){
-    for (size_t i = 0; i < timeout * 10; i++){
+    for (size_t i = 0; i < (size_t)(timeout * 10); i++){
         delay(100);
         if(i % 5 == 0)writeSerial(".",false);
-        if(!epd.isBusy()){
+        if(!bbepIsBusy(&bbep)){ 
         writeSerial(".");
         writeSerial("Refresh took ",false);
         writeSerial((String)((float)i / 10),false);
@@ -1008,7 +1056,7 @@ void reboot(){
     esp_restart();
     #endif
 }
-
+//legacy
 void handleImageInfo(uint8_t* data, uint16_t len) {
     writeSerial("=== HANDLING IMAGE INFO ===");
     writeSerial("Current image state before cleanup:");
@@ -1059,8 +1107,8 @@ void handleImageInfo(uint8_t* data, uint16_t len) {
     currentImage.dataType = dataType;
     currentImage.isCompressed = (dataType == 0x30);
     currentImage.ready = false;
-    currentImage.width = epd.width();
-    currentImage.height = epd.height();
+    currentImage.width = bbep.width;
+    currentImage.height = bbep.height;
     writeSerial("Image state initialized:");
     writeSerial("  Size: " + String(currentImage.size) + " bytes");
     writeSerial("  Type: 0x" + String(currentImage.dataType, HEX));
@@ -1257,7 +1305,7 @@ uint32_t calculateCRC32(uint8_t* data, uint32_t len) {
     }
     return crc ^ 0xFFFFFFFF;
 }
-
+//legacy
 void displayReceivedImage() {
     writeSerial("=== DISPLAYING RECEIVED IMAGE ===");
     if (!currentImage.data || currentImage.size == 0) {
@@ -1273,21 +1321,21 @@ void displayReceivedImage() {
     writeSerial("  Dimensions: " + String(currentImage.width) + "x" + String(currentImage.height));
     writeSerial("  Received: " + String(currentImage.received) + " bytes");
     pwrmgm(true);
-    epd.initIO(globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin);
+    bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
     drawImageData();
-    epd.writePlane();
-    epd.refresh(REFRESH_FULL, false);
+    bbepWritePlane(&bbep, PLANE_BOTH, false);
+    bbepRefresh(&bbep, REFRESH_FULL);
     waitforrefresh(60);
-    epd.sleep(DEEP_SLEEP);
+    bbepSleep(&bbep, DEEP_SLEEP);
     pwrmgm(false);
     writeSerial("=== IMAGE DISPLAY COMPLETE ===");
 }
-
+//legacy
 void drawImageData() {
     writeSerial("Drawing image data...");
     writeSerial("Image type: 0x" + String(currentImage.dataType, HEX));
-    uint16_t displayWidth = epd.width();
-    uint16_t displayHeight = epd.height();
+    uint16_t displayWidth = bbep.width;
+    uint16_t displayHeight = bbep.height;
     if (currentImage.dataType == 0x20) {
         writeSerial("Uncompressed image, drawing directly...");
         uint32_t pixelIndex = 0;
@@ -1298,7 +1346,7 @@ void drawImageData() {
                 for (int bit = 7; bit >= 0; bit--) {
                     if (x >= displayHeight) break;
                     bool pixelValue = (pixelByte >> bit) & 0x01;
-                    epd.drawPixel(displayWidth - y, x, pixelValue ? BBEP_BLACK : BBEP_WHITE);
+                    (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, pixelValue ? BBEP_BLACK : BBEP_WHITE);
                     x++;
                 }
                 x--;
@@ -1321,13 +1369,13 @@ void drawImageData() {
                     bool whiteBit = (pixelByte >> bit) & 0x01;
                     bool redBit = (redByte >> bit) & 0x01;
                     if (whiteBit && redBit) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_RED);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_RED);
                     } else if (!whiteBit && redBit) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_YELLOW);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_YELLOW);
                     } else if (whiteBit && !redBit) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_WHITE);
                     } else {
-                        epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_BLACK);
                     }
                     x++;
                 }
@@ -1355,20 +1403,20 @@ void drawImageData() {
                     bool plane3 = (greenByte >> bit) & 0x01;  // G/B
                     // Decode 6 colors: BLACK=000, WHITE=100, RED=110, YELLOW=010, GREEN=101, BLUE=001
                     if (!plane1 && !plane2 && !plane3) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_BLACK);
                     } else if (plane1 && !plane2 && !plane3) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_WHITE);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_WHITE);
                     } else if (plane1 && plane2 && !plane3) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_RED);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_RED);
                     } else if (!plane1 && plane2 && !plane3) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_YELLOW);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_YELLOW);
                     } else if (plane1 && !plane2 && plane3) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_GREEN);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GREEN);
                     } else if (!plane1 && !plane2 && plane3) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_BLUE);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_BLUE);
                     } else {
                         // Fallback for unused combinations (111, 011)
-                        epd.drawPixel(displayWidth - y, x, BBEP_BLACK);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_BLACK);
                     }
                     x++;
                 }
@@ -1397,13 +1445,13 @@ void drawImageData() {
                     uint8_t grayLevel = (pixelByte >> (6 - pixel * 2)) & 0x03;
                     // Map grayscale levels using constants: GRAY0=black, GRAY1=dark gray, GRAY2=light gray, GRAY3=white
                     if (grayLevel == 0) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY0);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY0);
                     } else if (grayLevel == 1) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY1);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY1);
                     } else if (grayLevel == 2) {
-                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY2);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY2);
                     } else {
-                        epd.drawPixel(displayWidth - y, x, BBEP_GRAY3);
+                        (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY3);
                     }
                 }
                 pixelIndex++;
@@ -1457,7 +1505,7 @@ void cleanupImageMemory() {
     receivedPackets = 0;
     writeSerial("=== MEMORY CLEANUP COMPLETE ===");
 }
-
+//legacy
 bool decompressImageDataChunked(){
     writeSerial("Starting chunked decompression with direct drawing...");
     uint32_t originalLength = 0;
@@ -1484,8 +1532,8 @@ bool decompressImageDataChunked(){
     uint16_t window = 0x100 << hdr;
     if (window > MAX_DICT_SIZE) window = MAX_DICT_SIZE;
     uzlib_uncompress_init(&d, dictionaryBuffer, window);
-    uint16_t displayWidth = epd.width();
-    uint16_t displayHeight = epd.height();
+    uint16_t displayWidth = bbep.width;
+    uint16_t displayHeight = bbep.height;
     writeSerial("Display width: " + String(displayWidth));
     writeSerial("Display height: " + String(displayHeight));
     uint32_t totalDecompressed = 0;
@@ -1562,7 +1610,7 @@ bool decompressImageDataChunked(){
                         for (int bit = 7; bit >= 0; bit--) {
                             if (y < ((imgHeight < displayWidth) ? imgHeight : displayWidth) && x + (7-bit) < ((imgWidth < displayHeight) ? imgWidth : displayHeight)) {
                                 bool pixelValue = (byte >> bit) & 0x01;
-                                epd.drawPixel(displayWidth - y, x + (7-bit), pixelValue ? BBEP_BLACK : BBEP_WHITE);
+                                (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x + (7-bit), pixelValue ? BBEP_BLACK : BBEP_WHITE);
                             }
                         }
                     } else if (colorType == 4) {
@@ -1580,13 +1628,13 @@ bool decompressImageDataChunked(){
                                 uint8_t grayLevel = (byte >> (6 - pixel * 2)) & 0x03;
                                 // Map grayscale levels using constants: GRAY0=black, GRAY1=dark gray, GRAY2=light gray, GRAY3=white
                                 if (grayLevel == 0) {
-                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY0);
+                                    (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY0);
                                 } else if (grayLevel == 1) {
-                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY1);
+                                    (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY1);
                                 } else if (grayLevel == 2) {
-                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY2);
+                                    (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY2);
                                 } else {
-                                    epd.drawPixel(displayWidth - y, x, BBEP_GRAY3);
+                                    (*bbep.pfnSetPixel)(&bbep, displayWidth - y, x, BBEP_GRAY3);
                                 }
                             }
                         }
@@ -1613,13 +1661,13 @@ bool decompressImageDataChunked(){
                                         bool redBit = (byte >> bit) & 0x01;
                                         
                                         if (whiteBit && redBit) {
-                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_RED);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_RED);
                                         } else if (!whiteBit && redBit) {
-                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_YELLOW);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_YELLOW);
                                         } else if (whiteBit && !redBit) {
-                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_WHITE);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_WHITE);
                                         } else {
-                                            epd.drawPixel(displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_BLACK);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - firstPlaneY, firstPlaneX + (7-bit), BBEP_BLACK);
                                         }
                                     }
                                 }
@@ -1657,20 +1705,20 @@ bool decompressImageDataChunked(){
                                         bool plane3 = (byte >> bit) & 0x01;              // G/B
                                         // Decode 6 colors: BLACK=000, WHITE=100, RED=110, YELLOW=010, GREEN=101, BLUE=001
                                         if (!plane1 && !plane2 && !plane3) {
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
                                         } else if (plane1 && !plane2 && !plane3) {
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_WHITE);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_WHITE);
                                         } else if (plane1 && plane2 && !plane3) {
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_RED);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_RED);
                                         } else if (!plane1 && plane2 && !plane3) {
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_YELLOW);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_YELLOW);
                                         } else if (plane1 && !plane2 && plane3) {
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_GREEN);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_GREEN);
                                         } else if (!plane1 && !plane2 && plane3) {
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLUE);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_BLUE);
                                         } else {
                                             // Fallback for unused combinations (111, 011)
-                                            epd.drawPixel(displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
+                                            (*bbep.pfnSetPixel)(&bbep, displayWidth - planeY, planeX + (7-bit), BBEP_BLACK);
                                         }
                                     }
                                 }
@@ -2259,7 +2307,6 @@ bool loadGlobalConfig(){
                 break;
             default:
                 writeSerial("WARNING: Unknown packet ID 0x" + String(packetId, HEX) + ", skipping");
-                // Skip unknown packet - we can't determine its size, so we'll stop parsing
                 offset = configLen - 2; // Skip to CRC
                 break;
         }
@@ -2449,9 +2496,564 @@ float readChipTemperature() {
         float tempC = tempRaw * 0.25;
         return tempC;
     }
+    return -999.0; // Fallback if SoftDevice API fails
     #else
     return -999.0;
     #endif
+}
+
+void handleDirectWriteStart(uint8_t* data, uint16_t len) {
+    writeSerial("=== DIRECT WRITE START ===");
+    directWriteCompressed = (len >= 4);
+    if (directWriteCompressed) {
+        memcpy(&directWriteDecompressedTotal, data, 4);
+        writeSerial("Compressed direct write mode");
+        writeSerial("Expected decompressed size: " + String(directWriteDecompressedTotal) + " bytes");
+        directWriteWidth = bbep.width;
+        directWriteHeight = bbep.height;
+        uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+        if (colorScheme == 4) {
+            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 1) / 2; // 2 pixels per byte
+        } else {
+            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // 1 bit per pixel
+        }
+        directWriteCompressedBuffer = imageDataBuffer;
+        directWriteCompressedSize = 0;  // Unknown until we receive all data
+        directWriteCompressedReceived = 0;
+        if (len > 4) {
+            uint32_t compressedDataLen = len - 4;
+            if (compressedDataLen <= MAX_IMAGE_SIZE) {
+                memcpy(directWriteCompressedBuffer, data + 4, compressedDataLen);
+                directWriteCompressedReceived = compressedDataLen;
+                writeSerial("Initial compressed data: " + String(compressedDataLen) + " bytes");
+            } else {
+                writeSerial("ERROR: Initial compressed data too large for static buffer");
+                return;
+            }
+        }
+    } else {
+        directWriteWidth = bbep.width;
+        directWriteHeight = bbep.height;
+        uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+        if (colorScheme == 4) {
+            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 1) / 2; // 2 pixels per byte
+        } else {
+            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // 1 bit per pixel
+        }
+    }
+    writeSerial("Display dimensions: " + String(directWriteWidth) + "x" + String(directWriteHeight));
+    writeSerial("Expected total bytes: " + String(directWriteTotalBytes));
+    directWriteActive = true;
+    directWriteBytesWritten = 0;
+    bbepWakeUp(&bbep);
+    bbepSendCMDSequence(&bbep, bbep.pInitFull);// important for some displays
+    bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
+    bbepStartWrite(&bbep, getplane());
+    uint8_t ackResponse[] = {0x70, 0x00};
+    sendResponse(ackResponse, sizeof(ackResponse));
+    writeSerial("Direct write mode started, ready for data");
+}
+
+int getplane() {
+    uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+    if (colorScheme == 0 || colorScheme == 1) {
+        return PLANE_0;
+    } else {
+        return PLANE_1;
+    }
+}
+
+int getBitsPerPixel() {
+    if (globalConfig.displays[0].color_scheme == 4) {
+        return 4; // 4 bits per pixel (2 pixels per byte)
+    }
+    if (globalConfig.displays[0].color_scheme == 1 || 
+        globalConfig.displays[0].color_scheme == 2 || 
+        globalConfig.displays[0].color_scheme == 3) {
+        return 2; // 2 bits per pixel (4 pixels per byte) for 3-4 color displays
+    }
+    if (globalConfig.displays[0].color_scheme == 5) {
+        return 2; // 2 bits per pixel (4 pixels per byte) for 4 grayscale
+    }
+    return 1; // 1 bit per pixel (8 pixels per byte)
+}
+
+void writeTextAndFill(const char* text) {
+    if (text == nullptr || bbep.native_width == 0) return;
+    int bitsPerPixel = getBitsPerPixel();
+    int pitch;
+    uint8_t whiteValue;
+    if (bitsPerPixel == 4) {
+        pitch = bbep.native_width / 2;
+        whiteValue = 0xFF;
+    } else if (bitsPerPixel == 2) {
+        pitch = (bbep.native_width + 3) / 4; // 4 pixels per byte
+        // For 2BPP: 4 pixels per byte, each pixel is 2 bits
+        // Encoding: 00=Black, 01=DarkGray/Yellow, 10=LightGray/White, 11=White
+        // For grayscale (color_scheme 5): white = 11 (0x03) -> 0xFF per byte (all pixels white)
+        // For 3-4 color (color_scheme 1,2,3): white = 10 (0x02) -> 0xAA per byte (all pixels white)
+        uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+        whiteValue = (colorScheme == 5) ? 0xFF : 0xAA; // 0xFF for grayscale, 0xAA for 3-4 color
+    } else {
+        pitch = (bbep.native_width + 7) / 8;
+        whiteValue = 0xFF;
+    }
+    uint8_t* whiteRow = (uint8_t*)malloc(pitch);
+    if (whiteRow == nullptr) return;
+    memset(whiteRow, whiteValue, pitch);
+    uint8_t* rowBuffer = (uint8_t*)malloc(pitch);
+    if (rowBuffer == nullptr) {
+        free(whiteRow);
+        return;
+    }
+    bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
+    bbepStartWrite(&bbep, getplane());
+    int charWidth = 16; // 7 font columns + 1 blank column, each doubled (8*2)
+    int charHeight = 16; // 8 pixels tall, doubled (8*2)
+    int maxChars = bbep.native_width / charWidth;
+    int lineCount = 1; // At least one line
+    const char* countPtr = text;
+    while (*countPtr != '\0') {
+        if (*countPtr == '\n' || *countPtr == '\r') {
+            lineCount++;
+            if (*countPtr == '\r' && *(countPtr + 1) == '\n') {
+                countPtr++; // Skip \r\n
+            }
+        }
+        countPtr++;
+    }
+    int totalTextHeight = lineCount * charHeight;
+    int remainingHeight = bbep.native_height - totalTextHeight;
+    int spacing = 0;
+    if (lineCount > 0) {
+        spacing = remainingHeight / (lineCount + 1);
+    }
+    const char* lineStart = text;
+    const char* current = text;
+    int currentY = 0;
+    int lineIndex = 0;
+    for (int s = 0; s < spacing && currentY < bbep.native_height; s++) {
+        bbepWriteData(&bbep, whiteRow, pitch);
+        currentY++;
+    }
+    while (*current != '\0') {
+        if (*current == '\n' || *current == '\r') {
+            int lineLen = current - lineStart;
+            if (lineLen > 0) {
+                char* line = (char*)malloc(lineLen + 1);
+                if (line != nullptr) {
+                    memcpy(line, lineStart, lineLen);
+                    line[lineLen] = '\0';
+                    int textLen = strlen(line);
+                    if (textLen > maxChars) textLen = maxChars;
+                    int textWidthPixels = textLen * charWidth;
+                    int startX = (bbep.native_width - textWidthPixels) / 2;
+                    if (startX < 0) startX = 0;
+                    if (lineIndex > 0) {
+                        for (int s = 0; s < spacing && currentY < bbep.native_height; s++) {
+                            bbepWriteData(&bbep, whiteRow, pitch);
+                            currentY++;
+                        }
+                    }
+                    for (int row = 0; row < charHeight && currentY < bbep.native_height; row++) {
+                        memset(rowBuffer, whiteValue, pitch);
+                        int fontRow = row / 2;
+                        for (int charIdx = 0; charIdx < textLen; charIdx++) {
+                            uint8_t c = (uint8_t)line[charIdx];
+                            if (c < 32 || c > 127) c = 32;
+                            uint8_t fontData[7];
+                            int fontOffset = (c - 32) * 7;
+                            memcpy_P(fontData, &writelineFont[fontOffset], 7);
+                            if (bitsPerPixel == 4) {
+                                for (int col = 0; col < charWidth; col += 2) {
+                                    int pixelX = startX + charIdx * charWidth + col;
+                                    if (pixelX >= bbep.native_width) break;
+                                    int bytePos = pixelX / 2;
+                                    if (bytePos >= pitch) break;
+                                    uint8_t leftFontByte, rightFontByte;
+                                    int leftFontCol = col / 2;
+                                    int rightFontCol = (col + 1) / 2;
+                                    
+                                    if (leftFontCol == 0) {
+                                        leftFontByte = 0x00;
+                                    } else {
+                                        leftFontByte = fontData[leftFontCol - 1];
+                                    }
+                                    if (rightFontCol == 0) {
+                                        rightFontByte = 0x00;
+                                    } else {
+                                        rightFontByte = fontData[rightFontCol - 1];
+                                    }
+                                    uint8_t leftPixelBit = (leftFontByte >> fontRow) & 0x01;
+                                    uint8_t rightPixelBit = (rightFontByte >> fontRow) & 0x01;
+                                    uint8_t leftNibble = (leftPixelBit == 1) ? 0x0 : 0xF;  // 1=black=0x0, 0=white=0xF
+                                    uint8_t rightNibble = (rightPixelBit == 1) ? 0x0 : 0xF; // 1=black=0x0, 0=white=0xF
+                                    
+                                    rowBuffer[bytePos] = (leftNibble << 4) | rightNibble;
+                                }
+                            } else if (bitsPerPixel == 2) {
+                                // 2BPP: 4 pixels per byte
+                                // Encoding: 00=Black, 01=DarkGray/Yellow, 10=LightGray/White, 11=White
+                                // For text: black=00, white=11 (or 10 for 3-4 color, but use 11 for consistency)
+                                uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+                                uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x02; // 11 for grayscale, 10 for 3-4 color
+                                
+                                for (int col = 0; col < charWidth; col += 4) {
+                                    // Process 4 pixels at a time (one byte)
+                                    uint8_t pixelByte = 0;
+                                    for (int p = 0; p < 4; p++) {
+                                        int pixelX = startX + charIdx * charWidth + col + p;
+                                        if (pixelX >= bbep.native_width) break;
+                                        
+                                        uint8_t fontByte;
+                                        int fontCol = (col + p) / 2;
+                                        if (fontCol == 0) {
+                                            fontByte = 0x00;
+                                        } else {
+                                            fontByte = fontData[fontCol - 1];
+                                        }
+                                        uint8_t pixelBit = (fontByte >> fontRow) & 0x01;
+                                        
+                                        // Encode pixel: 00=black, whiteCode=white
+                                        uint8_t pixelValue = (pixelBit == 1) ? 0x00 : whiteCode;
+                                        
+                                        // Pack into byte: bits 7-6, 5-4, 3-2, 1-0
+                                        pixelByte |= (pixelValue << (6 - p * 2));
+                                    }
+                                    
+                                    int bytePos = (startX + charIdx * charWidth + col) / 4;
+                                    if (bytePos < pitch) {
+                                        rowBuffer[bytePos] = pixelByte;
+                                    }
+                                }
+                            } else {
+                                for (int col = 0; col < charWidth; col++) {
+                                    uint8_t fontByte;
+                                    int fontCol = col / 2;
+                                    if (fontCol == 0) {
+                                        fontByte = 0x00;
+                                    } else {
+                                        fontByte = fontData[fontCol - 1];
+                                    }
+                                    uint8_t pixelBit = (fontByte >> fontRow) & 0x01;
+                                    int pixelX = startX + charIdx * charWidth + col;
+                                    if (pixelX >= bbep.native_width) break;
+                                    
+                                    int bytePos = pixelX / 8;
+                                    int bitPos = 7 - (pixelX % 8);
+                                    if (bytePos < pitch) {
+                                        if (pixelBit == 1) {
+                                            rowBuffer[bytePos] &= ~(1 << bitPos);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        bbepWriteData(&bbep, rowBuffer, pitch);
+                        currentY++;
+                    }
+                    free(line);
+                    lineIndex++;
+                }
+            } else {
+                if (lineIndex > 0) {
+                    for (int s = 0; s < spacing && currentY < bbep.native_height; s++) {
+                        bbepWriteData(&bbep, whiteRow, pitch);
+                        currentY++;
+                    }
+                }
+                for (int row = 0; row < charHeight && currentY < bbep.native_height; row++) {
+                    bbepWriteData(&bbep, whiteRow, pitch);
+                    currentY++;
+                }
+                lineIndex++;
+            }
+            if (*current == '\r' && *(current + 1) == '\n') {
+                current++;
+            }
+            current++;
+            lineStart = current;
+        } else {
+            current++;
+        }
+    }
+    if (current > lineStart) {
+        int lineLen = current - lineStart;
+        char* line = (char*)malloc(lineLen + 1);
+        if (line != nullptr) {
+            memcpy(line, lineStart, lineLen);
+            line[lineLen] = '\0';
+            if (lineIndex > 0) {
+                for (int s = 0; s < spacing && currentY < bbep.native_height; s++) {
+                    bbepWriteData(&bbep, whiteRow, pitch);
+                    currentY++;
+                }
+            }
+            int textLen = strlen(line);
+            if (textLen > maxChars) textLen = maxChars;
+            int textWidthPixels = textLen * charWidth;
+            int startX = (bbep.native_width - textWidthPixels) / 2;
+            if (startX < 0) startX = 0;
+            
+            for (int row = 0; row < charHeight && currentY < bbep.native_height; row++) {
+                if (bitsPerPixel == 4) {
+                    memset(rowBuffer, whiteValue, pitch);
+                } else {
+                    memset(rowBuffer, whiteValue, pitch);
+                }
+                int fontRow = row / 2;
+                for (int charIdx = 0; charIdx < textLen; charIdx++) {
+                    uint8_t c = (uint8_t)line[charIdx];
+                    if (c < 32 || c > 127) c = 32;
+                    uint8_t fontData[7];
+                    int fontOffset = (c - 32) * 7;
+                    memcpy_P(fontData, &writelineFont[fontOffset], 7);
+                    if (bitsPerPixel == 4) {
+                        for (int col = 0; col < charWidth; col += 2) {
+                            int pixelX = startX + charIdx * charWidth + col;
+                            if (pixelX >= bbep.native_width) break;
+                            int bytePos = pixelX / 2;
+                            if (bytePos >= pitch) break;
+                            uint8_t leftFontByte, rightFontByte;
+                            int leftFontCol = col / 2;
+                            int rightFontCol = (col + 1) / 2;
+                            
+                            if (leftFontCol == 0) {
+                                leftFontByte = 0x00;
+                            } else {
+                                leftFontByte = fontData[leftFontCol - 1];
+                            }
+                            if (rightFontCol == 0) {
+                                rightFontByte = 0x00;
+                            } else {
+                                rightFontByte = fontData[rightFontCol - 1];
+                            }
+                            uint8_t leftPixelBit = (leftFontByte >> fontRow) & 0x01;
+                            uint8_t rightPixelBit = (rightFontByte >> fontRow) & 0x01;
+                            uint8_t leftNibble = (leftPixelBit == 1) ? 0x0 : 0xF;  // 1=black=0x0, 0=white=0xF
+                            uint8_t rightNibble = (rightPixelBit == 1) ? 0x0 : 0xF; // 1=black=0x0, 0=white=0xF
+                            rowBuffer[bytePos] = (leftNibble << 4) | rightNibble;
+                        }
+                    } else if (bitsPerPixel == 2) {
+                        // 2BPP: 4 pixels per byte
+                        // Encoding: 00=Black, 01=DarkGray/Yellow, 10=LightGray/White, 11=White
+                        // For text: black=00, white=11 (or 10 for 3-4 color, but use 11 for consistency)
+                        uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+                        uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x02; // 11 for grayscale, 10 for 3-4 color
+                        
+                        for (int col = 0; col < charWidth; col += 4) {
+                            // Process 4 pixels at a time (one byte)
+                            uint8_t pixelByte = 0;
+                            for (int p = 0; p < 4; p++) {
+                                int pixelX = startX + charIdx * charWidth + col + p;
+                                if (pixelX >= bbep.native_width) break;
+                                
+                                uint8_t fontByte;
+                                int fontCol = (col + p) / 2;
+                                if (fontCol == 0) {
+                                    fontByte = 0x00;
+                                } else {
+                                    fontByte = fontData[fontCol - 1];
+                                }
+                                uint8_t pixelBit = (fontByte >> fontRow) & 0x01;
+                                
+                                // Encode pixel: 00=black, whiteCode=white
+                                uint8_t pixelValue = (pixelBit == 1) ? 0x00 : whiteCode;
+                                
+                                // Pack into byte: bits 7-6, 5-4, 3-2, 1-0
+                                pixelByte |= (pixelValue << (6 - p * 2));
+                            }
+                            
+                            int bytePos = (startX + charIdx * charWidth + col) / 4;
+                            if (bytePos < pitch) {
+                                rowBuffer[bytePos] = pixelByte;
+                            }
+                        }
+                    } else {
+                        for (int col = 0; col < charWidth; col++) {
+                            uint8_t fontByte;
+                            int fontCol = col / 2;
+                            if (fontCol == 0) {
+                                fontByte = 0x00;
+                            } else {
+                                fontByte = fontData[fontCol - 1];
+                            }
+                            uint8_t pixelBit = (fontByte >> fontRow) & 0x01;
+                            int pixelX = startX + charIdx * charWidth + col;
+                            if (pixelX >= bbep.native_width) break;
+                            
+                            int bytePos = pixelX / 8;
+                            int bitPos = 7 - (pixelX % 8);
+                            if (bytePos < pitch) {
+                                if (pixelBit == 1) {
+                                    rowBuffer[bytePos] &= ~(1 << bitPos);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                bbepWriteData(&bbep, rowBuffer, pitch);
+                currentY++;
+            }
+            free(line);
+        }
+    }
+    for (int s = 0; s < spacing && currentY < bbep.native_height; s++) {
+        bbepWriteData(&bbep, whiteRow, pitch);
+        currentY++;
+    }
+    while (currentY < bbep.native_height) {
+        bbepWriteData(&bbep, whiteRow, pitch);
+        currentY++;
+    }
+    if (currentY != bbep.native_height) {
+        writeSerial("WARNING: writeTextAndFill wrote " + String(currentY) + " rows, expected " + String(bbep.native_height));
+    } else {
+        writeSerial("writeTextAndFill: Wrote " + String(currentY) + " rows (" + String(pitch) + " bytes/row, " + String(pitch * currentY) + " total bytes)");
+    }
+    free(whiteRow);
+    free(rowBuffer);
+}
+
+void handleDirectWriteData(uint8_t* data, uint16_t len) {
+    if (!directWriteActive) {
+        writeSerial("ERROR: Direct write data received but mode not active");
+        return;
+    }
+    if (len == 0) {
+        writeSerial("WARNING: Empty data packet received");
+        return;
+    }
+    if (directWriteCompressed) {
+        handleDirectWriteCompressedData(data, len);
+    } else {
+        bbepWriteData(&bbep, data, len);
+        directWriteBytesWritten += len;
+        writeSerial("Direct write: " + String(len) + " bytes written (total: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + ")");
+        if (directWriteBytesWritten >= directWriteTotalBytes) {
+            writeSerial("All data written, ending direct write mode");
+            handleDirectWriteEnd();
+        } else {
+            uint8_t ackResponse[] = {0x71, 0x00};
+            sendResponse(ackResponse, sizeof(ackResponse));
+        }
+    }
+}
+
+void handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
+    uint32_t newTotalSize = directWriteCompressedReceived + len;
+    if (newTotalSize > MAX_IMAGE_SIZE && directWriteCompressedBuffer == imageDataBuffer) {
+        uint8_t* newBuffer = (uint8_t*)malloc(newTotalSize);
+        if (newBuffer == nullptr) {
+            writeSerial("ERROR: Failed to allocate " + String(newTotalSize) + " bytes for compressed data");
+            return;
+        }
+        if (directWriteCompressedReceived > 0) {
+            memcpy(newBuffer, directWriteCompressedBuffer, directWriteCompressedReceived);
+        }
+        if (directWriteCompressedBuffer != imageDataBuffer && directWriteCompressedBuffer != nullptr) {
+            free(directWriteCompressedBuffer);
+        }
+        directWriteCompressedBuffer = newBuffer;
+        writeSerial("Allocated dynamic buffer: " + String(newTotalSize) + " bytes");
+    } else if (newTotalSize > MAX_IMAGE_SIZE) {
+        uint8_t* newBuffer = (uint8_t*)realloc(directWriteCompressedBuffer, newTotalSize);
+        if (newBuffer == nullptr) {
+            writeSerial("ERROR: Failed to reallocate " + String(newTotalSize) + " bytes for compressed data");
+            return;
+        }
+        directWriteCompressedBuffer = newBuffer;
+        writeSerial("Reallocated buffer to: " + String(newTotalSize) + " bytes");
+    }
+    memcpy(directWriteCompressedBuffer + directWriteCompressedReceived, data, len);
+    directWriteCompressedReceived += len;
+    writeSerial("Accumulated compressed data: " + String(directWriteCompressedReceived) + " bytes");
+    uint8_t ackResponse[] = {0x71, 0x00};
+    sendResponse(ackResponse, sizeof(ackResponse));
+}
+
+void decompressDirectWriteData() {
+    if (directWriteCompressedReceived == 0) {
+        writeSerial("ERROR: No compressed data to decompress");
+        return;
+    }
+    writeSerial("Starting decompression of " + String(directWriteCompressedReceived) + " bytes compressed data");
+    struct uzlib_uncomp d;
+    memset(&d, 0, sizeof(d));
+    d.source = directWriteCompressedBuffer;
+    d.source_limit = directWriteCompressedBuffer + directWriteCompressedReceived;
+    d.source_read_cb = NULL;
+    uzlib_init();
+    int hdr = uzlib_zlib_parse_header(&d);
+    if (hdr < 0) {
+        writeSerial("ERROR: Invalid zlib header: " + String(hdr));
+        return;
+    }
+    uint16_t window = 0x100 << hdr;
+    if (window > MAX_DICT_SIZE) window = MAX_DICT_SIZE;
+    uzlib_uncompress_init(&d, dictionaryBuffer, window);
+    int res;
+    do {
+        d.dest_start = decompressionChunk;
+        d.dest = decompressionChunk;
+        d.dest_limit = decompressionChunk + DECOMP_CHUNK_SIZE;
+        res = uzlib_uncompress(&d);
+        size_t bytesOut = d.dest - d.dest_start;
+        if (bytesOut > 0) {
+            bbepWriteData(&bbep, decompressionChunk, bytesOut);
+            directWriteBytesWritten += bytesOut;
+            writeSerial("Decompressed: " + String(bytesOut) + " bytes, written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes));
+        }
+        
+        if (res == TINF_DATA_ERROR) {
+            writeSerial("ERROR: Decompression data error");
+            break;
+        }
+    } while (res == TINF_OK && directWriteBytesWritten < directWriteTotalBytes);
+    
+    if (res == TINF_DONE || directWriteBytesWritten >= directWriteTotalBytes) {
+        writeSerial("Decompression complete: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + " bytes written");
+    } else {
+        writeSerial("ERROR: Decompression failed with code: " + String(res));
+    }
+}
+
+void handleDirectWriteEnd() {
+    if (!directWriteActive) {
+        writeSerial("WARNING: Direct write end called but mode not active");
+        return;
+    }
+    writeSerial("=== DIRECT WRITE END ===");
+    if (directWriteCompressed && directWriteCompressedReceived > 0) {
+        writeSerial("Decompressing accumulated compressed data...");
+        decompressDirectWriteData();
+    }
+    writeSerial("Total bytes written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes));
+    if (directWriteCompressed) {
+        writeSerial("Compressed bytes received: " + String(directWriteCompressedReceived));
+    }
+    bbepRefresh(&bbep, REFRESH_FULL);
+    waitforrefresh(60);
+    if (directWriteCompressedBuffer != nullptr && directWriteCompressedBuffer != imageDataBuffer) {
+        free(directWriteCompressedBuffer);
+        writeSerial("Freed dynamically allocated compressed buffer");
+    }
+    directWriteActive = false;
+    directWriteCompressed = false;
+    directWriteBytesWritten = 0;
+    directWriteCompressedReceived = 0;
+    directWriteCompressedSize = 0;
+    directWriteDecompressedTotal = 0;
+    directWriteCompressedBuffer = nullptr;
+    directWriteWidth = 0;
+    directWriteHeight = 0;
+    directWriteTotalBytes = 0;
+    
+    // Send acknowledgment
+    uint8_t ackResponse[] = {0x72, 0x00};
+    sendResponse(ackResponse, sizeof(ackResponse));
+    writeSerial("Direct write completed and display refreshed");
 }
 
 #ifdef TARGET_NRF
@@ -2511,6 +3113,17 @@ void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len){
         case 0x0043: // Firmware Version command
             writeSerial("=== FIRMWARE VERSION COMMAND (0x0043) ===");
             handleFirmwareVersion();
+            break;
+        case 0x0070: // Direct Write Start command
+            writeSerial("=== DIRECT WRITE START COMMAND (0x0070) ===");
+            handleDirectWriteStart(data + 2, len - 2);
+            break;
+        case 0x0071: // Direct Write Data command
+            handleDirectWriteData(data + 2, len - 2);
+            break;
+        case 0x0072: // Direct Write End command
+            writeSerial("=== DIRECT WRITE END COMMAND (0x0072) ===");
+            handleDirectWriteEnd();
             break;
         default:
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
