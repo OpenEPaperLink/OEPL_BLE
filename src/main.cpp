@@ -2504,6 +2504,9 @@ float readChipTemperature() {
 
 void handleDirectWriteStart(uint8_t* data, uint16_t len) {
     writeSerial("=== DIRECT WRITE START ===");
+    uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+    directWriteBitplanes = (colorScheme == 1 || colorScheme == 2); // BWR/BWY use bitplanes
+    directWritePlane2 = false; // Start with plane 1
     directWriteCompressed = (len >= 4);
     if (directWriteCompressed) {
         memcpy(&directWriteDecompressedTotal, data, 4);
@@ -2511,11 +2514,19 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
         writeSerial("Expected decompressed size: " + String(directWriteDecompressedTotal) + " bytes");
         directWriteWidth = bbep.width;
         directWriteHeight = bbep.height;
-        uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-        if (colorScheme == 4) {
-            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 1) / 2; // 2 pixels per byte
+        if (directWriteBitplanes) {
+            // Bitplanes: each plane is 1BPP, total data is 2x plane size
+            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // Bytes per plane
+            writeSerial("Bitplane mode: " + String(directWriteTotalBytes) + " bytes per plane, " + String(directWriteTotalBytes * 2) + " total");
         } else {
-            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // 1 bit per pixel
+            int bitsPerPixel = getBitsPerPixel();
+            if (bitsPerPixel == 4) {
+                directWriteTotalBytes = (directWriteWidth * directWriteHeight + 1) / 2; // 2 pixels per byte
+            } else if (bitsPerPixel == 2) {
+                directWriteTotalBytes = (directWriteWidth * directWriteHeight + 3) / 4; // 4 pixels per byte
+            } else {
+                directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // 8 pixels per byte
+            }
         }
         directWriteCompressedBuffer = imageDataBuffer;
         directWriteCompressedSize = 0;  // Unknown until we receive all data
@@ -2534,21 +2545,29 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
     } else {
         directWriteWidth = bbep.width;
         directWriteHeight = bbep.height;
-        uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-        if (colorScheme == 4) {
-            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 1) / 2; // 2 pixels per byte
+        if (directWriteBitplanes) {
+            // Bitplanes: each plane is 1BPP, total data is 2x plane size
+            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // Bytes per plane
+            writeSerial("Bitplane mode: " + String(directWriteTotalBytes) + " bytes per plane, " + String(directWriteTotalBytes * 2) + " total");
         } else {
-            directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // 1 bit per pixel
+            int bitsPerPixel = getBitsPerPixel();
+            if (bitsPerPixel == 4) {
+                directWriteTotalBytes = (directWriteWidth * directWriteHeight + 1) / 2; // 2 pixels per byte
+            } else if (bitsPerPixel == 2) {
+                directWriteTotalBytes = (directWriteWidth * directWriteHeight + 3) / 4; // 4 pixels per byte
+            } else {
+                directWriteTotalBytes = (directWriteWidth * directWriteHeight + 7) / 8; // 8 pixels per byte
+            }
         }
     }
     writeSerial("Display dimensions: " + String(directWriteWidth) + "x" + String(directWriteHeight));
-    writeSerial("Expected total bytes: " + String(directWriteTotalBytes));
+    writeSerial("Expected total bytes: " + String(directWriteTotalBytes) + (directWriteBitplanes ? " per plane" : ""));
     directWriteActive = true;
     directWriteBytesWritten = 0;
     bbepWakeUp(&bbep);
     bbepSendCMDSequence(&bbep, bbep.pInitFull);// important for some displays
     bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
-    bbepStartWrite(&bbep, getplane());
+    bbepStartWrite(&bbep, directWriteBitplanes ? PLANE_0 : getplane());
     uint8_t ackResponse[] = {0x70, 0x00};
     sendResponse(ackResponse, sizeof(ackResponse));
     writeSerial("Direct write mode started, ready for data");
@@ -2556,9 +2575,12 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
 
 int getplane() {
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    if (colorScheme == 0 || colorScheme == 1) {
+    if (colorScheme == 0) {
         return PLANE_0;
-    } else {
+    } else if (colorScheme == 1 || colorScheme == 2) {
+        return PLANE_0;
+    }
+    else {
         return PLANE_1;
     }
 }
@@ -2567,9 +2589,7 @@ int getBitsPerPixel() {
     if (globalConfig.displays[0].color_scheme == 4) {
         return 4; // 4 bits per pixel (2 pixels per byte)
     }
-    if (globalConfig.displays[0].color_scheme == 1 || 
-        globalConfig.displays[0].color_scheme == 2 || 
-        globalConfig.displays[0].color_scheme == 3) {
+    if (globalConfig.displays[0].color_scheme == 3) {
         return 2; // 2 bits per pixel (4 pixels per byte) for 3-4 color displays
     }
     if (globalConfig.displays[0].color_scheme == 5) {
@@ -2580,6 +2600,8 @@ int getBitsPerPixel() {
 
 void writeTextAndFill(const char* text) {
     if (text == nullptr || bbep.native_width == 0) return;
+    uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+    bool useBitplanes = (colorScheme == 1 || colorScheme == 2); // BWR/BWY use bitplanes
     int bitsPerPixel = getBitsPerPixel();
     int pitch;
     uint8_t whiteValue;
@@ -2589,11 +2611,14 @@ void writeTextAndFill(const char* text) {
     } else if (bitsPerPixel == 2) {
         pitch = (bbep.native_width + 3) / 4; // 4 pixels per byte
         // For 2BPP: 4 pixels per byte, each pixel is 2 bits
-        // Encoding: 00=Black, 01=DarkGray/Yellow, 10=LightGray/White, 11=White
-        // For grayscale (color_scheme 5): white = 11 (0x03) -> 0xFF per byte (all pixels white)
-        // For 3-4 color (color_scheme 1,2,3): white = 10 (0x02) -> 0xAA per byte (all pixels white)
+        // For grayscale (color_scheme 5): 00=Black, 01=DarkGray, 10=LightGray, 11=White -> 0xFF per byte
+        // For 3-4 color (color_scheme 1,2,3): 00=Black, 01=White, 10=Yellow, 11=Red (for BWRY direct write)
         uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-        whiteValue = (colorScheme == 5) ? 0xFF : 0xAA; // 0xFF for grayscale, 0xAA for 3-4 color
+        if (colorScheme == 5) {
+            whiteValue = 0xFF; // All pixels = 11 (white) for grayscale
+        } else {
+            whiteValue = 0x55; // All pixels = 01 (white) for 3-4 color displays
+        }
     } else {
         pitch = (bbep.native_width + 7) / 8;
         whiteValue = 0xFF;
@@ -2693,10 +2718,10 @@ void writeTextAndFill(const char* text) {
                                 }
                             } else if (bitsPerPixel == 2) {
                                 // 2BPP: 4 pixels per byte
-                                // Encoding: 00=Black, 01=DarkGray/Yellow, 10=LightGray/White, 11=White
-                                // For text: black=00, white=11 (or 10 for 3-4 color, but use 11 for consistency)
+                                // For grayscale (color_scheme 5): 00=Black, 01=DarkGray, 10=LightGray, 11=White
+                                // For 3-4 color (color_scheme 1,2,3): 00=Black, 01=White, 10=Yellow, 11=Red
                                 uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-                                uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x02; // 11 for grayscale, 10 for 3-4 color
+                                uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x01; // 11 for grayscale, 01 for 3-4 color
                                 
                                 for (int col = 0; col < charWidth; col += 4) {
                                     // Process 4 pixels at a time (one byte)
@@ -2836,10 +2861,10 @@ void writeTextAndFill(const char* text) {
                         }
                     } else if (bitsPerPixel == 2) {
                         // 2BPP: 4 pixels per byte
-                        // Encoding: 00=Black, 01=DarkGray/Yellow, 10=LightGray/White, 11=White
-                        // For text: black=00, white=11 (or 10 for 3-4 color, but use 11 for consistency)
+                        // For grayscale (color_scheme 5): 00=Black, 01=DarkGray, 10=LightGray, 11=White
+                        // For 3-4 color (color_scheme 1,2,3): 00=Black, 01=White, 10=Yellow, 11=Red
                         uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-                        uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x02; // 11 for grayscale, 10 for 3-4 color
+                        uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x01; // 11 for grayscale, 01 for 3-4 color
                         
                         for (int col = 0; col < charWidth; col += 4) {
                             // Process 4 pixels at a time (one byte)
@@ -2912,6 +2937,22 @@ void writeTextAndFill(const char* text) {
     } else {
         writeSerial("writeTextAndFill: Wrote " + String(currentY) + " rows (" + String(pitch) + " bytes/row, " + String(pitch * currentY) + " total bytes)");
     }
+    
+    // For BWR/BWY bitplane displays, write plane 2 (R/Y) with all zeros
+    if (useBitplanes) {
+        uint8_t* plane2Row = (uint8_t*)malloc(pitch);
+        if (plane2Row != nullptr) {
+            memset(plane2Row, 0x00, pitch); // All zeros = no red/yellow
+            bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
+            bbepStartWrite(&bbep, PLANE_1);
+            for (int row = 0; row < bbep.native_height; row++) {
+                bbepWriteData(&bbep, plane2Row, pitch);
+            }
+            free(plane2Row);
+            writeSerial("writeTextAndFill: Wrote plane 2 (R/Y) with zeros for bitplane display");
+        }
+    }
+    
     free(whiteRow);
     free(rowBuffer);
 }
@@ -2928,15 +2969,74 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
     if (directWriteCompressed) {
         handleDirectWriteCompressedData(data, len);
     } else {
-        bbepWriteData(&bbep, data, len);
-        directWriteBytesWritten += len;
-        writeSerial("Direct write: " + String(len) + " bytes written (total: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + ")");
-        if (directWriteBytesWritten >= directWriteTotalBytes) {
-            writeSerial("All data written, ending direct write mode");
-            handleDirectWriteEnd();
+        if (directWriteBitplanes) {
+            // Bitplane mode: handle plane switching
+            uint16_t dataOffset = 0;
+            uint16_t remainingLen = len;
+            
+            while (remainingLen > 0) {
+                if (!directWritePlane2) {
+                    // Writing to plane 1
+                    uint32_t remainingInPlane = directWriteTotalBytes - directWriteBytesWritten;
+                    uint16_t bytesToWrite = (remainingLen > remainingInPlane) ? remainingInPlane : remainingLen;
+                    
+                    if (bytesToWrite > 0) {
+                        bbepWriteData(&bbep, data + dataOffset, bytesToWrite);
+                        directWriteBytesWritten += bytesToWrite;
+                        writeSerial("Direct write plane 1: " + String(bytesToWrite) + " bytes written (total: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + ")");
+                        dataOffset += bytesToWrite;
+                        remainingLen -= bytesToWrite;
+                    }
+                    
+                    // Check if plane 1 is complete, switch to plane 2
+                    if (directWriteBytesWritten >= directWriteTotalBytes && !directWritePlane2) {
+                        writeSerial("Plane 1 complete, switching to plane 2");
+                        directWritePlane2 = true;
+                        directWriteBytesWritten = 0;
+                        bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
+                        bbepStartWrite(&bbep, PLANE_1);
+                    }
+                } else {
+                    // Writing to plane 2
+                    uint32_t remainingInPlane = directWriteTotalBytes - directWriteBytesWritten;
+                    uint16_t bytesToWrite = (remainingLen > remainingInPlane) ? remainingInPlane : remainingLen;
+                    
+                    if (bytesToWrite > 0) {
+                        bbepWriteData(&bbep, data + dataOffset, bytesToWrite);
+                        directWriteBytesWritten += bytesToWrite;
+                        writeSerial("Direct write plane 2: " + String(bytesToWrite) + " bytes written (total: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + ")");
+                        dataOffset += bytesToWrite;
+                        remainingLen -= bytesToWrite;
+                    }
+                    
+                    // Check if plane 2 is complete
+                    if (directWriteBytesWritten >= directWriteTotalBytes) {
+                        writeSerial("Plane 2 complete");
+                        break;
+                    }
+                }
+            }
+            
+            // Check if both planes are complete
+            if (directWritePlane2 && directWriteBytesWritten >= directWriteTotalBytes) {
+                writeSerial("All planes written, ending direct write mode");
+                handleDirectWriteEnd();
+            } else {
+                uint8_t ackResponse[] = {0x71, 0x00};
+                sendResponse(ackResponse, sizeof(ackResponse));
+            }
         } else {
-            uint8_t ackResponse[] = {0x71, 0x00};
-            sendResponse(ackResponse, sizeof(ackResponse));
+            // Non-bitplane mode (existing logic)
+            bbepWriteData(&bbep, data, len);
+            directWriteBytesWritten += len;
+            writeSerial("Direct write: " + String(len) + " bytes written (total: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + ")");
+            if (directWriteBytesWritten >= directWriteTotalBytes) {
+                writeSerial("All data written, ending direct write mode");
+                handleDirectWriteEnd();
+            } else {
+                uint8_t ackResponse[] = {0x71, 0x00};
+                sendResponse(ackResponse, sizeof(ackResponse));
+            }
         }
     }
 }
@@ -2993,29 +3093,71 @@ void decompressDirectWriteData() {
     uint16_t window = 0x100 << hdr;
     if (window > MAX_DICT_SIZE) window = MAX_DICT_SIZE;
     uzlib_uncompress_init(&d, dictionaryBuffer, window);
-    int res;
-    do {
-        d.dest_start = decompressionChunk;
-        d.dest = decompressionChunk;
-        d.dest_limit = decompressionChunk + DECOMP_CHUNK_SIZE;
-        res = uzlib_uncompress(&d);
-        size_t bytesOut = d.dest - d.dest_start;
-        if (bytesOut > 0) {
-            bbepWriteData(&bbep, decompressionChunk, bytesOut);
-            directWriteBytesWritten += bytesOut;
-            writeSerial("Decompressed: " + String(bytesOut) + " bytes, written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes));
-        }
-        
-        if (res == TINF_DATA_ERROR) {
-            writeSerial("ERROR: Decompression data error");
-            break;
-        }
-    } while (res == TINF_OK && directWriteBytesWritten < directWriteTotalBytes);
     
-    if (res == TINF_DONE || directWriteBytesWritten >= directWriteTotalBytes) {
-        writeSerial("Decompression complete: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + " bytes written");
+    if (directWriteBitplanes) {
+        // For bitplanes, decompress all data first, then write plane 1, then plane 2
+        uint8_t* decompressedBuffer = (uint8_t*)malloc(directWriteDecompressedTotal);
+        if (decompressedBuffer == nullptr) {
+            writeSerial("ERROR: Failed to allocate " + String(directWriteDecompressedTotal) + " bytes for decompressed data");
+            return;
+        }
+        uint32_t decompressedSize = 0;
+        int res;
+        do {
+            d.dest_start = decompressedBuffer + decompressedSize;
+            d.dest = decompressedBuffer + decompressedSize;
+            d.dest_limit = decompressedBuffer + directWriteDecompressedTotal;
+            res = uzlib_uncompress(&d);
+            decompressedSize = d.dest - decompressedBuffer;
+        } while (res == TINF_OK && decompressedSize < directWriteDecompressedTotal);
+        
+        if (res == TINF_DONE || decompressedSize >= directWriteDecompressedTotal) {
+            writeSerial("Decompression complete: " + String(decompressedSize) + " bytes");
+            // Write plane 1
+            bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
+            bbepStartWrite(&bbep, PLANE_0);
+            bbepWriteData(&bbep, decompressedBuffer, directWriteTotalBytes);
+            directWriteBytesWritten = directWriteTotalBytes;
+            writeSerial("Plane 1 written: " + String(directWriteTotalBytes) + " bytes");
+            
+            // Write plane 2
+            if (decompressedSize >= directWriteTotalBytes * 2) {
+                bbepSetAddrWindow(&bbep, 0, 0, bbep.native_width, bbep.native_height);
+                bbepStartWrite(&bbep, PLANE_1);
+                bbepWriteData(&bbep, decompressedBuffer + directWriteTotalBytes, directWriteTotalBytes);
+                directWriteBytesWritten += directWriteTotalBytes;
+                writeSerial("Plane 2 written: " + String(directWriteTotalBytes) + " bytes");
+            }
+        } else {
+            writeSerial("ERROR: Decompression failed with code: " + String(res));
+        }
+        free(decompressedBuffer);
     } else {
-        writeSerial("ERROR: Decompression failed with code: " + String(res));
+        // Non-bitplane mode: write as we decompress
+        int res;
+        do {
+            d.dest_start = decompressionChunk;
+            d.dest = decompressionChunk;
+            d.dest_limit = decompressionChunk + DECOMP_CHUNK_SIZE;
+            res = uzlib_uncompress(&d);
+            size_t bytesOut = d.dest - d.dest_start;
+            if (bytesOut > 0) {
+                bbepWriteData(&bbep, decompressionChunk, bytesOut);
+                directWriteBytesWritten += bytesOut;
+                writeSerial("Decompressed: " + String(bytesOut) + " bytes, written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes));
+            }
+            
+            if (res == TINF_DATA_ERROR) {
+                writeSerial("ERROR: Decompression data error");
+                break;
+            }
+        } while (res == TINF_OK && directWriteBytesWritten < directWriteTotalBytes);
+        
+        if (res == TINF_DONE || directWriteBytesWritten >= directWriteTotalBytes) {
+            writeSerial("Decompression complete: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + " bytes written");
+        } else {
+            writeSerial("ERROR: Decompression failed with code: " + String(res));
+        }
     }
 }
 
@@ -3029,7 +3171,11 @@ void handleDirectWriteEnd() {
         writeSerial("Decompressing accumulated compressed data...");
         decompressDirectWriteData();
     }
-    writeSerial("Total bytes written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes));
+    if (directWriteBitplanes) {
+        writeSerial("Total bytes written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes) + " per plane (" + String(directWritePlane2 ? "plane 2" : "plane 1") + ")");
+    } else {
+        writeSerial("Total bytes written: " + String(directWriteBytesWritten) + "/" + String(directWriteTotalBytes));
+    }
     if (directWriteCompressed) {
         writeSerial("Compressed bytes received: " + String(directWriteCompressedReceived));
     }

@@ -114,11 +114,13 @@ bool wifiConfigured = false;  // True if WiFi config packet (0x26) was received 
 // Direct write mode state (bufferless display writing)
 bool directWriteActive = false;  // True when direct write mode is active
 bool directWriteCompressed = false;  // True if using compressed direct write
-uint32_t directWriteBytesWritten = 0;  // Total bytes written to display
+bool directWriteBitplanes = false;  // True if using bitplanes (BWR/BWY - 2 planes)
+bool directWritePlane2 = false;  // True when writing plane 2 (R/Y) for bitplanes
+uint32_t directWriteBytesWritten = 0;  // Total bytes written to current plane
 uint32_t directWriteDecompressedTotal = 0;  // Expected decompressed size
 uint16_t directWriteWidth = 0;  // Display width in pixels
 uint16_t directWriteHeight = 0;  // Display height in pixels
-uint32_t directWriteTotalBytes = 0;  // Total bytes expected (width * height / 8)
+uint32_t directWriteTotalBytes = 0;  // Total bytes expected per plane (for bitplanes) or total (for others)
 
 // Direct write compressed mode: use same buffer as regular image upload
 uint32_t directWriteCompressedSize = 0;  // Total compressed size expected
