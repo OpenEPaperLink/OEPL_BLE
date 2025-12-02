@@ -28,19 +28,24 @@ using namespace Adafruit_LittleFS_Namespace;
 #include <Wire.h>
 
 #define DECOMP_CHUNK 512
-#define MAX_DECOMPRESSED_SIZE (512 * 1024)
 #define DECOMP_CHUNK_SIZE 4096
 #define MAX_DICT_SIZE 32768
-#ifdef TARGET_LARGE_MEMORY
-#define MAX_IMAGE_SIZE (100 * 1024)
-#define MAX_COMPRESSED_SIZE (200 * 1024)
-#else
 #define MAX_IMAGE_SIZE (50 * 1024)
-#define MAX_COMPRESSED_SIZE (100 * 1024)
-#endif
 #define MAX_BLOCKS 64
 #define CONFIG_FILE_PATH "/config.bin"
 #define MAX_CONFIG_SIZE 4096
+// Text rendering constants
+#define FONT_CHAR_WIDTH 16  // 7 font columns + 1 blank column, each doubled (8*2)
+#define FONT_CHAR_HEIGHT 16 // 8 pixels tall, doubled (8*2)
+#define FONT_BASE_WIDTH 8   // Base font width (7 columns + 1 spacing)
+#define FONT_BASE_HEIGHT 8  // Base font height (8 rows)
+#define FONT_SMALL_THRESHOLD 264  // Use 1x scale for displays narrower than this
+// Config chunked write constants
+#define CONFIG_CHUNK_SIZE 200  // Maximum size of a config chunk
+#define CONFIG_CHUNK_SIZE_WITH_PREFIX 202  // Chunk size with 2-byte size prefix
+#define MAX_CONFIG_CHUNKS 20  // Maximum number of chunks allowed
+// Response buffer constants
+#define MAX_RESPONSE_DATA_SIZE 100  // Maximum data size in response buffer
 
 #ifdef TARGET_NRF
 #include <bluefruit.h>
@@ -75,36 +80,24 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
 int bbepSetPanelType(BBEPDISP *pBBEP, int iPanel);
 void bbepSetRotation(BBEPDISP *pBBEP, int iRotation);
 void bbepStartWrite(BBEPDISP *pBBEP, int iPlane);
-int bbepAllocBuffer(BBEPDISP *pBBEP, int bDoubleSize);
 int bbepRefresh(BBEPDISP *pBBEP, int iMode);
-void bbepDrawSprite(BBEPDISP *pBBEP, const uint8_t *pSprite, int cx, int cy, int iPitch, int x, int y, uint8_t iColor);
-void bbepFill(BBEPDISP *pBBEP, unsigned char ucColor, int iPlane);
-int bbepWritePlane(BBEPDISP *pBBEP, int iPlane, int bInvert);
-void bbepWaitBusy(BBEPDISP *pBBEP);
 bool bbepIsBusy(BBEPDISP *pBBEP);
-void bbepSleep(BBEPDISP *pBBEP, int bDeep);
-void bbepSetCursor(BBEPDISP *pBBEP, int x, int y);
-int bbepWriteString(BBEPDISP *pBBEP, int x, int y, char *szMsg, int iSize, int iColor, int iBG);
-void bbepRectangle(BBEPDISP *pBBEP, int x1, int y1, int x2, int y2, uint8_t ucColor, uint8_t bFilled);
 void bbepWakeUp(BBEPDISP *pBBEP);
 void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
 void bbepSetAddrWindow(BBEPDISP *pBBEP, int x, int y, int cx, int cy);
 void bbepWriteData(BBEPDISP *pBBEP, uint8_t *pData, int iLen);
 
-ImageData currentImage = {0};
-uint8_t currentBlockId = 0;
-uint8_t currentPacketId = 0;
-uint8_t expectedPackets = 0;
-uint8_t receivedPackets = 0;
-uint8_t imageDataBuffer[MAX_IMAGE_SIZE];
-bool blocksReceived[MAX_BLOCKS];
-uint32_t blockBytesReceived[MAX_BLOCKS];
-uint32_t blockPacketsReceived[MAX_BLOCKS];
+uint8_t compressedDataBuffer[MAX_IMAGE_SIZE];  // Static buffer for compressed image data
 uint8_t decompressionChunk[DECOMP_CHUNK_SIZE];
 uint8_t dictionaryBuffer[MAX_DICT_SIZE];
-uint8_t headerBuffer[6];
 uint8_t bleResponseBuffer[94];
 uint8_t mloopcounter = 0;
+
+// Static buffers for writeTextAndFill() to avoid dynamic allocation
+// Maximum pitch: 1360px / 2 = 680 bytes (4BPP), line buffer: 256 bytes
+uint8_t staticWhiteRow[680];
+uint8_t staticRowBuffer[680];
+char staticLineBuffer[256];
 
 char wifiSsid[33] = {0};  // 32 bytes + null terminator
 char wifiPassword[33] = {0};  // 32 bytes + null terminator
@@ -125,34 +118,27 @@ uint32_t directWriteTotalBytes = 0;  // Total bytes expected per plane (for bitp
 // Direct write compressed mode: use same buffer as regular image upload
 uint32_t directWriteCompressedSize = 0;  // Total compressed size expected
 uint32_t directWriteCompressedReceived = 0;  // Total compressed bytes received
-uint8_t* directWriteCompressedBuffer = nullptr;  // Pointer to buffer (imageDataBuffer or dynamically allocated)
+uint8_t* directWriteCompressedBuffer = nullptr;  // Pointer to compressedDataBuffer (static allocation only)
 
-void checkimage();
 bool waitforrefresh(int timeout);
 void pwrmgm(bool onoff);
 void writeSerial(String message, bool newLine = true);
 void connect_callback(uint16_t conn_handle);
 void disconnect_callback(uint16_t conn_handle, uint8_t reason);
 void initDisplay();
-void hibernateDisplay();
-void writeDisplayData();
 String getChipIdHex();
+
+// Platform-specific type aliases for BLE callback
 #ifdef TARGET_NRF
-void imageDataWritten(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len);
+    typedef uint16_t BLEConnHandle;
+    typedef BLECharacteristic* BLECharPtr;
 #else
-void imageDataWritten(void* conn_hdl, void* chr, uint8_t* data, uint16_t len);
+    typedef void* BLEConnHandle;
+    typedef void* BLECharPtr;
 #endif
-void handleImageInfo(uint8_t* data, uint16_t len);
-void handleBlockData(uint8_t* data, uint16_t len);
-void handleReadDynamicConfig();
-void buildDynamicConfigResponse(uint8_t* buffer, uint16_t* len);
-void handleDisplayInfo();
+
+void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len);
 void sendResponse(uint8_t* response, uint8_t len);
-uint32_t calculateCRC32(uint8_t* data, uint32_t len);
-void displayReceivedImage();
-void drawImageData();
-void drawLogo(int x, int y);
-void busyCallback(const void*);
 void initio();
 void initDataBuses();
 void scanI2CDevices();
@@ -160,8 +146,6 @@ void initSensors();
 void initAXP2101(uint8_t busId);
 void readAXP2101Data();
 void updatemsdata();
-void cleanupImageMemory();
-bool decompressImageDataChunked();
 void ble_init();
 void full_config_init();
 void formatConfigStorage();
@@ -177,25 +161,9 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len);
 void handleDirectWriteData(uint8_t* data, uint16_t len);
 void handleDirectWriteEnd();
 void handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
-void processDirectWriteCompressedBuffer();
 void printConfigSummary();
 void reboot();
 bool loadGlobalConfig();
-bool isConfigLoaded();
-struct SystemConfig* getSystemConfig();
-struct ManufacturerData* getManufacturerData();
-struct PowerOption* getPowerOption();
-struct DisplayConfig* getDisplayConfig(uint8_t index);
-uint8_t getDisplayCount();
-struct LedConfig* getLedConfig(uint8_t index);
-uint8_t getLedCount();
-struct SensorData* getSensorData(uint8_t index);
-uint8_t getSensorCount();
-struct DataBus* getDataBus(uint8_t index);
-uint8_t getDataBusCount();
-struct BinaryInputs* getBinaryInput(uint8_t index);
-uint8_t getBinaryInputCount();
-void printConfigSummary();
 int mapEpd(int id);
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
@@ -226,8 +194,6 @@ extern chunked_write_state_t chunkedWriteState;
 chunked_write_state_t chunkedWriteState = {false, 0, 0, {0}, 0, 0};
 struct GlobalConfig globalConfig = {0};
 uint8_t configReadResponseBuffer[128];
-
-extern struct GlobalConfig globalConfig;
 
 #define AXP2101_SLAVE_ADDRESS 0x34
 #define AXP2101_REG_POWER_STATUS 0x00
@@ -344,7 +310,8 @@ BLECharacteristic* pTxCharacteristic = nullptr;
 BLECharacteristic* pRxCharacteristic = nullptr;
 BLEAdvertisementData globalAdvertisementData;  // Global object, not pointer
 BLEAdvertisementData* advertisementData = &globalAdvertisementData;  // Pointer to global object
-MyBLECharacteristicCallbacks* charCallbacks = nullptr;
+MyBLEServerCallbacks staticServerCallbacks;  // Static callback object (no dynamic allocation)
+MyBLECharacteristicCallbacks staticCharCallbacks;  // Static callback object (no dynamic allocation)
 #endif
 
 const uint8_t writelineFont[] PROGMEM = {
