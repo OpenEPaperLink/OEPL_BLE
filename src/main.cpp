@@ -1703,7 +1703,7 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
     bbepSendCMDSequence(&bbep, bbep.pInitFull);// important for some displays
     bbepSetAddrWindow(&bbep, 0, 0, globalConfig.displays[0].pixel_width, globalConfig.displays[0].pixel_height);
     bbepStartWrite(&bbep, directWriteBitplanes ? PLANE_0 : getplane());
-    uint8_t ackResponse[] = {0x70, 0x00};
+    uint8_t ackResponse[] = {0x00, 0x70};
     sendResponse(ackResponse, sizeof(ackResponse));
     writeSerial("Direct write mode started, ready for data");
 }
@@ -2056,7 +2056,7 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
                 writeSerial("All planes written, ending direct write mode");
                 handleDirectWriteEnd();
             } else {
-                uint8_t ackResponse[] = {0x71, 0x00};
+                uint8_t ackResponse[] = {0x00, 0x71};
                 sendResponse(ackResponse, sizeof(ackResponse));
             }
         } else {
@@ -2067,7 +2067,7 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
                 writeSerial("All data written, ending direct write mode");
                 handleDirectWriteEnd();
             } else {
-                uint8_t ackResponse[] = {0x71, 0x00};
+                uint8_t ackResponse[] = {0x00, 0x71};
                 sendResponse(ackResponse, sizeof(ackResponse));
             }
         }
@@ -2090,7 +2090,7 @@ void handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
     memcpy(directWriteCompressedBuffer + directWriteCompressedReceived, data, len);
     directWriteCompressedReceived += len;
     writeSerial("Accumulated compressed data: " + String(directWriteCompressedReceived) + " bytes");
-    uint8_t ackResponse[] = {0x71, 0x00};
+    uint8_t ackResponse[] = {0x00, 0x71};
     sendResponse(ackResponse, sizeof(ackResponse));
 }
 
@@ -2241,7 +2241,7 @@ void handleDirectWriteEnd() {
     directWriteWidth = 0;
     directWriteHeight = 0;
     directWriteTotalBytes = 0;
-    uint8_t ackResponse[] = {0x72, 0x00};
+    uint8_t ackResponse[] = {0x00, 0x72};
     sendResponse(ackResponse, sizeof(ackResponse));
     writeSerial("Direct write completed and display refreshed");
 }
