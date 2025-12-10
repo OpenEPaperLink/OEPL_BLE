@@ -47,6 +47,17 @@ using namespace Adafruit_LittleFS_Namespace;
 // Response buffer constants
 #define MAX_RESPONSE_DATA_SIZE 100  // Maximum data size in response buffer
 
+// Device flags bit definitions (for system_config.device_flags)
+#define DEVICE_FLAG_PWR_PIN      (1 << 0)  // Bit 0: Device has external power management pin
+#define DEVICE_FLAG_XIAOINIT     (1 << 1)  // Bit 1: Call xiaoinit() after config load (nRF52840 only)
+
+// Transmission mode bit definitions (for display.transmission_modes)
+#define TRANSMISSION_MODE_RAW          (1 << 0)  // Bit 0: Raw transfer
+#define TRANSMISSION_MODE_ZIP          (1 << 1)  // Bit 1: ZIP compressed transfer
+#define TRANSMISSION_MODE_G5           (1 << 2)  // Bit 2: Group 5 compression
+#define TRANSMISSION_MODE_DIRECT_WRITE (1 << 3)  // Bit 3: Direct write mode (bufferless)
+#define TRANSMISSION_MODE_CLEAR_ON_BOOT (1 << 7) // Bit 7: Clear screen at bootup (writeTextAndFill with empty string)
+
 #ifdef TARGET_NRF
 #include <bluefruit.h>
 extern BLEDfu bledfu;
@@ -122,6 +133,8 @@ uint8_t* directWriteCompressedBuffer = nullptr;  // Pointer to compressedDataBuf
 
 bool waitforrefresh(int timeout);
 void pwrmgm(bool onoff);
+bool powerDownExternalFlash(uint8_t mosiPin, uint8_t misoPin, uint8_t sckPin, uint8_t csPin, uint8_t wpPin, uint8_t holdPin);
+void xiaoinit();
 void writeSerial(String message, bool newLine = true);
 void connect_callback(uint16_t conn_handle);
 void disconnect_callback(uint16_t conn_handle, uint8_t reason);

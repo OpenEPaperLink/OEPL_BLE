@@ -1,8 +1,10 @@
 #include "main.h"
 
 void setup() {
+    #ifndef DISABLE_USB_SERIAL
     Serial.begin(115200);
     delay(100);
+    #endif
     writeSerial("=== FIRMWARE INFO ===");
     writeSerial("Firmware Version: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()));
     const char* shaCStr = SHA_STRING;
@@ -612,6 +614,13 @@ void full_config_init(){
     if (loadGlobalConfig()) {
         writeSerial("Global configuration loaded successfully");
         printConfigSummary();
+        #ifdef TARGET_NRF
+        if (globalConfig.loaded && (globalConfig.system_config.device_flags & DEVICE_FLAG_XIAOINIT)) {
+            writeSerial("Device flag DEVICE_FLAG_XIAOINIT is set, calling xiaoinit()...");
+            xiaoinit();
+            writeSerial("xiaoinit() completed");
+        }
+        #endif
     } else {
        writeSerial("Global configuration load failed or no config found");
     }
@@ -755,8 +764,134 @@ void pwrmgm(bool onoff){
 }
 
 void writeSerial(String message, bool newLine){
+    #ifndef DISABLE_USB_SERIAL
     if (newLine == true) Serial.println(message);
     else Serial.print(message);
+    #endif
+    // When USB is disabled, writeSerial does nothing (no-op) to save power
+}
+
+void xiaoinit(){
+    powerDownExternalFlash(20,24,21,25,22,23);
+    pinMode(31, INPUT);
+    pinMode(14, INPUT);
+    pinMode(13, OUTPUT);  //that actually does something
+    digitalWrite(13, LOW);
+    pinMode(17, INPUT);
+    //buttons
+    pinMode(15, INPUT);
+    pinMode(3, INPUT);
+    pinMode(28, INPUT);
+}
+
+bool powerDownExternalFlash(uint8_t mosiPin, uint8_t misoPin, uint8_t sckPin, uint8_t csPin, uint8_t wpPin, uint8_t holdPin) {
+    #ifdef TARGET_NRF
+    // Software SPI transfer function (bit-banging)
+    auto spiTransfer = [&](uint8_t data) -> uint8_t {
+        uint8_t result = 0;
+        for (int i = 7; i >= 0; i--) {
+            // Set MOSI to current bit
+            digitalWrite(mosiPin, (data >> i) & 1);
+            // Clock low
+            digitalWrite(sckPin, LOW);
+            delayMicroseconds(1);
+            // Read MISO
+            result |= (digitalRead(misoPin) << i);
+            // Clock high
+            digitalWrite(sckPin, HIGH);
+            delayMicroseconds(1);
+        }
+        return result;
+    };
+    writeSerial("=== External Flash Power-Down ===");
+    writeSerial("Pin configuration: MOSI=" + String(mosiPin) + " MISO=" + String(misoPin) + " SCK=" + String(sckPin) + " CS=" + String(csPin) + " WP=" + String(wpPin) + " HOLD=" + String(holdPin));
+    writeSerial("Configuring SPI pins...");
+    pinMode(mosiPin, OUTPUT);
+    pinMode(misoPin, INPUT);
+    pinMode(sckPin, OUTPUT);
+    pinMode(csPin, OUTPUT);
+    pinMode(wpPin, OUTPUT);
+    pinMode(holdPin, OUTPUT);
+    writeSerial("SPI pins configured");
+    digitalWrite(sckPin, HIGH);  // Clock idle high (SPI mode 0)
+    digitalWrite(csPin, HIGH);   // CS inactive
+    digitalWrite(wpPin, HIGH);   // WP disabled (active-low)
+    digitalWrite(holdPin, HIGH); // HOLD disabled (active-low)
+    writeSerial("Control pins set: CS=HIGH, WP=HIGH (disabled), HOLD=HIGH (disabled), SCK=HIGH (idle)");
+    delay(1);
+    writeSerial("Attempting to wake flash from deep power-down (command 0xAB)...");
+    digitalWrite(csPin, LOW);
+    spiTransfer(0xAB);
+    digitalWrite(csPin, HIGH);
+    delay(10); // Wait for flash to wake up (typically 3-35us, using 10ms for safety)
+    writeSerial("Wake-up command sent, waiting 10ms...");
+    // Read JEDEC ID before power-down (for verification)
+    writeSerial("Reading JEDEC ID before power-down...");
+    digitalWrite(csPin, LOW);
+    spiTransfer(0x9F); // JEDEC ID command
+    uint8_t jedecId[3];
+    for (int i = 0; i < 3; i++) {
+        jedecId[i] = spiTransfer(0x00);
+    }
+    digitalWrite(csPin, HIGH);
+    String jedecIdStr = "0x";
+    for (int i = 0; i < 3; i++) {
+        if (jedecId[i] < 16) jedecIdStr += "0";
+        jedecIdStr += String(jedecId[i], HEX);
+    }
+    jedecIdStr.toUpperCase();
+    writeSerial("JEDEC ID before: " + jedecIdStr + " (Manufacturer=0x" + String(jedecId[0], HEX) + ", MemoryType=0x" + String(jedecId[1], HEX) + ", Capacity=0x" + String(jedecId[2], HEX) + ")");
+    bool flashResponding = false;
+    for (int i = 0; i < 3; i++) {
+        if (jedecId[i] != 0xFF) {
+            flashResponding = true;
+            break;
+        }
+    }
+    delay(1);
+    writeSerial("Sending deep power-down command (0xB9)...");
+    digitalWrite(csPin, LOW);
+    spiTransfer(0xB9);
+    digitalWrite(csPin, HIGH);
+    if(false){
+    writeSerial("Deep power-down command sent, waiting 10ms...");
+    delay(10); // Wait for command to complete
+    writeSerial("Reading JEDEC ID after power-down command...");
+    digitalWrite(csPin, LOW);
+    spiTransfer(0x9F);
+    uint8_t jedecIdAfter[3];
+    for (int i = 0; i < 3; i++) {
+        jedecIdAfter[i] = spiTransfer(0x00);
+    }
+    digitalWrite(csPin, HIGH);
+    String jedecIdAfterStr = "0x";
+    for (int i = 0; i < 3; i++) {
+        if (jedecIdAfter[i] < 16) jedecIdAfterStr += "0";
+        jedecIdAfterStr += String(jedecIdAfter[i], HEX);
+    }
+    jedecIdAfterStr.toUpperCase();
+    writeSerial("JEDEC ID after: " + jedecIdAfterStr + " (byte[0]=0x" + String(jedecIdAfter[0], HEX) + ", byte[1]=0x" + String(jedecIdAfter[1], HEX) + ", byte[2]=0x" + String(jedecIdAfter[2], HEX) + ")");
+    bool inPowerDown = true;
+    String mismatchBytes = "";
+    for (int i = 0; i < 3; i++) {
+        if (jedecIdAfter[i] != 0xFF) {
+            inPowerDown = false;
+            if (mismatchBytes.length() > 0) mismatchBytes += ", ";
+            mismatchBytes += "byte[" + String(i) + "]=0x" + String(jedecIdAfter[i], HEX) + " (expected 0xFF)";
+        }
+    }
+    }
+    digitalWrite(csPin, HIGH);
+    pinMode(wpPin, INPUT);
+    pinMode(holdPin, INPUT);
+    pinMode(mosiPin, INPUT);
+    pinMode(misoPin, INPUT);
+    pinMode(sckPin, INPUT);    
+    #else
+    writeSerial("External flash power-down not implemented for ESP32");
+    return false;
+    #endif
+    return false;
 }
 
 int mapEpd(int id){
@@ -844,9 +979,11 @@ void initDisplay(){
     bbepSendCMDSequence(&bbep, bbep.pInitFull);
     String chipId = getChipIdHex();
     String infoText = "openepaperlink.org\nName: OEPL" + chipId + "\nFW: " + String(getFirmwareMajor()) + "." + String(getFirmwareMinor()) + "\nEpaper driver by\nLarry Bank\ngithub.com/bitbank2";
-    writeTextAndFill(infoText.c_str());
+    if (globalConfig.displays[0].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) writeTextAndFill("");
+    else writeTextAndFill(infoText.c_str());
     bbepRefresh(&bbep, REFRESH_FULL);
     waitforrefresh(60);
+    pwrmgm(false);
     }
     else{
         writeSerial("No display found");
@@ -1476,6 +1613,10 @@ void printConfigSummary(){
     writeSerial("IC Type: 0x" + String(globalConfig.system_config.ic_type, HEX));
     writeSerial("Communication Modes: 0x" + String(globalConfig.system_config.communication_modes, HEX));
     writeSerial("Device Flags: 0x" + String(globalConfig.system_config.device_flags, HEX));
+    writeSerial("  PWR_PIN flag: " + String((globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_PIN) ? "enabled" : "disabled"));
+    #ifdef TARGET_NRF
+    writeSerial("  XIAOINIT flag: " + String((globalConfig.system_config.device_flags & DEVICE_FLAG_XIAOINIT) ? "enabled" : "disabled"));
+    #endif
     writeSerial("Power Pin: " + String(globalConfig.system_config.pwr_pin));
     writeSerial("");
     // Manufacturer Data
@@ -1519,6 +1660,11 @@ void printConfigSummary(){
         writeSerial("  Partial Update: " + String(globalConfig.displays[i].partial_update_support ? "Yes" : "No"));
         writeSerial("  Color Scheme: 0x" + String(globalConfig.displays[i].color_scheme, HEX));
         writeSerial("  Transmission Modes: 0x" + String(globalConfig.displays[i].transmission_modes, HEX));
+        writeSerial("    RAW: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_RAW) ? "enabled" : "disabled"));
+        writeSerial("    ZIP: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_ZIP) ? "enabled" : "disabled"));
+        writeSerial("    G5: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_G5) ? "enabled" : "disabled"));
+        writeSerial("    DIRECT_WRITE: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_DIRECT_WRITE) ? "enabled" : "disabled"));
+        writeSerial("    CLEAR_ON_BOOT: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) ? "enabled" : "disabled"));
         writeSerial("");
     }
     // LEDs
@@ -1699,6 +1845,8 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
     writeSerial("Expected total bytes: " + String(directWriteTotalBytes) + (directWriteBitplanes ? " per plane" : ""));
     directWriteActive = true;
     directWriteBytesWritten = 0;
+    pwrmgm(true);
+    bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
     bbepWakeUp(&bbep);
     bbepSendCMDSequence(&bbep, bbep.pInitFull);// important for some displays
     bbepSetAddrWindow(&bbep, 0, 0, globalConfig.displays[0].pixel_width, globalConfig.displays[0].pixel_height);
@@ -2231,6 +2379,7 @@ void handleDirectWriteEnd() {
     }
     bbepRefresh(&bbep, REFRESH_FULL);
     waitforrefresh(60);
+    pwrmgm(false);
     directWriteActive = false;
     directWriteCompressed = false;
     directWriteBytesWritten = 0;
